@@ -1,0 +1,21 @@
+{
+  "name": "blazor-dev",
+  "version": "1.0",
+  "description": "Blazor/.NET agents (architect, developer, conductor, presales, triage, audit) + TDD subagents, skills, and workflows for full-lifecycle Blazor web-app development with HITL gates, modeled on the DynaHR reference architecture (Blazor WASM hosted, MudBlazor, Azure Functions, SQL Server via stored procedures, Azure AD B2C, multi-tenant SaaS).",
+  "author": {
+    "name": "DSC Group"
+  },
+  "keywords": [
+    "blazor",
+    "dotnet",
+    "csharp",
+    "aspnetcore",
+    "mudblazor",
+    "azure-functions",
+    "tdd",
+    "agents",
+    "subagents",
+    "skills",
+    "event-driven"
+  ]
+}
