@@ -18,7 +18,7 @@ You are a tactical research assistant, invoked only by `blazor-conductor`. You d
 ## What to Gather
 
 - **Solution structure**: which projects (Client/Server/Shared/Shared.Server/Domain/ServiceFn) are touched by the request; existing `<ProjectReference>` direction
-- **Existing patterns**: similar components/services already in the codebase (via `Grep`/`Glob` and the C# LSP server's find-references/go-to-definition)
+- **Existing patterns**: similar components/services already in the codebase (via `Grep`/`Glob` and the C# LSP server's find-references/go-to-definition). Explicitly include: shared component base classes (e.g. `*Base.cs`) a new page could extend instead of duplicating bootstrap logic, and established UI patterns (wizards, multi-step forms, dialogs, caching decorators) a new flow should follow instead of reinventing — name these directly in your findings even if the request didn't ask about them, since a plan built without this context tends to duplicate rather than reuse.
 - **DI registrations**: where services get registered (`Program.cs` in Server/Client), so the plan can name the right registration point
 - **Data access convention**: stored-procedure-only vs EF Core in this project — check `Shared.Server/Services/` for the pattern actually in use, don't assume
 - **Test project structure**: xUnit/bUnit project layout, existing test naming conventions

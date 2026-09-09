@@ -38,11 +38,12 @@ public async Task<ServiceResponse<Employee>> GetEmployeeAsync(Guid tenantId, int
 - **Always parameterize** — `AddWithValue`/`Parameters.Add` with typed values, never string-concatenate a value into a command text (there shouldn't be command text to concatenate into, but this also applies to any dynamic proc-name construction).
 - **`ServiceResponse<T>` wrapping** — every service method returns a wrapper with `.Success`/`.Data`/`.ErrorMessage`; callers check `.Success` before touching `.Data`.
 - **Dynamic WHERE/`$filter` construction** (list/search endpoints): use the project's `QueryProvider`/`Filter.CreateList()`-style abstraction rather than hand-building SQL fragments — keeps the proc-call surface consistent and injection-safe.
-- **Tenant scoping**: every proc call that touches tenant data takes the tenant identifier as an explicit `@TenantId`-style parameter — see `skill-multitenancy`.
+- **Tenant scoping**: depends on which multi-tenancy pattern the project uses (see `skill-multitenancy`) — a shared-database project passes the tenant identifier as an explicit `@TenantId`-style parameter on every proc call; a per-tenant-database project already opened the tenant-scoped connection before this call, so an explicit `@TenantId` parameter on the proc itself is redundant (don't add one just to "be safe" — confirm the pattern first).
 
 ## Reviewing for This Pattern
 
 When auditing a change, flag:
 - A new `DbSet<T>`/EF Core usage in a project that has no existing EF Core footprint (introduces a second data-access pattern silently)
 - Inline `SqlCommand` with a hand-built command-text string instead of `CommandType.StoredProcedure`
-- A stored-procedure call missing a tenant parameter where sibling procs have one
+- In a shared-database project: a stored-procedure call missing a tenant parameter where sibling procs have one
+- In a per-tenant-database project: a new table/proc that adds a `TenantId` column/parameter it doesn't need — the real per-row scoping column there is the sub-tenant discriminator (e.g. `CompanyId`), not the tenant id
