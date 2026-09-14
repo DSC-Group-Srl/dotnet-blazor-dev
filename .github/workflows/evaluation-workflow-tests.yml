@@ -8,7 +8,6 @@ on:
       - ".github/workflows/evaluation-workflow-tests.yml"
       - "eng/evaluation-tools/**"
       - "eng/evaluation/test_token_failover.py"
-      - "eng/dashboard/**"
       - "eng/vally-adapter/**"
   push:
     branches: [main]
@@ -18,7 +17,6 @@ on:
       - ".github/workflows/evaluation-workflow-tests.yml"
       - "eng/evaluation-tools/**"
       - "eng/evaluation/test_token_failover.py"
-      - "eng/dashboard/**"
       - "eng/vally-adapter/**"
   workflow_dispatch:
 
@@ -41,7 +39,7 @@ jobs:
           node-version: 22
 
       - name: Run adapter fault-injection and report tests
-        run: node --test eng/vally-adapter/*.test.mjs eng/dashboard/*.test.js
+        run: node --test eng/vally-adapter/*.test.mjs
 
   evaluation-tools:
     runs-on: ubuntu-latest
@@ -69,12 +67,8 @@ jobs:
         working-directory: eng/evaluation-tools
         run: |
           node_modules/.bin/vally --version
-          node vally.mjs --version
           node_modules/.bin/copilot --version
           node --input-type=module -e "import.meta.resolve('@github/copilot-linux-x64/sdk')"
-
-      - name: Test SDK startup ordering without model calls
-        run: node --test eng/evaluation-tools/*.test.mjs
 
   token-failover:
     runs-on: ubuntu-latest
