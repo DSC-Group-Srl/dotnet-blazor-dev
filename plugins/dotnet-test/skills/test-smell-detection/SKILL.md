@@ -88,6 +88,11 @@ Apply these before assigning a finding:
   Exception Handling.
 - Integration markers legitimize declared external resources and multi-step
   flows, but not fixed sleeps or assertion-free execution.
+- For integration tests, trace helper factories and repository return types
+  before judging branch coverage. If a test branches on a subtype or state that
+  the real helper can never produce, report the unreachable assertion path and
+  explain the resulting false confidence. Do not stop at assigning the generic
+  Conditional Test Logic label.
 - A local temporary file still meets the formal Mystery Guest definition.
   Hermetic creation and cleanup reduce its severity; they do not change its
   taxonomy.
@@ -96,6 +101,15 @@ Apply these before assigning a finding:
   Equality.
 - Do not infer a smell from method names alone. Point to the statement or
   fixture relationship that proves it.
+- Do not infer a high-severity non-catalog validity defect from a test name
+  alone. Without production code or an explicit contract proving that the test
+  is supposed to invoke another component, a name/body mismatch is at most an
+  unranked observation, not evidence that the test silently passes broken
+  production behavior.
+- Catch2 `SECTION` and `GENERATE` are runner-controlled case expansion, and
+  `REQUIRE` is a real assertion. When those are the only suspicious constructs,
+  the academic-smell verdict is **clean**. Do not reverse that verdict because
+  the test could have broader behavioral coverage.
 - If no material smell remains after calibration, say that clearly. Never
   manufacture findings to fill a report.
 - Never propose `await` for a void or otherwise non-awaitable API. If production
@@ -124,6 +138,9 @@ Scale the response to the input:
   findings across dashboards, prose, and plans.
 - Show code only when it clarifies a fix; omit unchanged setup.
 - Add brief **Not findings** only for plausibly suspicious idioms.
+- Put proven non-catalog validity defects after the academic-smell verdict. On a
+  clean input with no production contract, do not assign severity to optional
+  coverage observations or let them overturn the clean verdict.
 - Do not narrate discovery or catalog loading; return the audit directly.
 
 Every reported smell must have a formal taxonomy name, precise location,
@@ -137,6 +154,8 @@ evidence from the code, practical risk, and a concrete framework-correct fix.
   remains Mystery Guest; rationale and hermetic cleanup change severity only.
 - Framework idioms and integration boundaries were calibrated before reporting.
 - Clean tests and suspicious-but-valid idioms are not turned into filler.
+- Clean framework idioms are not converted into high-severity non-catalog
+  findings from naming or absent production context.
 - Fixes use the target framework's APIs and preserve the behavior under test.
 - Claims about files reviewed, builds, or test runs match actions actually
   performed.

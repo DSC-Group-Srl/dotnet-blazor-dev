@@ -1,157 +1,241 @@
 ---
 name: test-gap-analysis
 description: >-
-  Find or close verified behavioral gaps in existing tests. EXISTING SUITES
-  ONLY. USE FOR: "add missing edge cases", "would tests catch this bug?",
-  weak tests, boundary/guard/logic/error-propagation gaps, or survived/
-  pseudo-mutation analysis. Polyglot. DO NOT USE FOR: .NET line-vs-branch or
+  Pseudo-mutation analysis ONLY: answer whether tests would catch a bug if
+  production code changed, which meaningful changes would still pass, or which
+  caller-visible mutations existing assertions would miss; verify candidates
+  when requested, then optionally close verified gaps. Activate for behavioral
+  blind spots or missing edge cases tied to production behavior. Polyglot. DO
+  NOT USE FOR: suite organization, taxonomy,
+  metadata, or distribution reports (test-tagging); .NET line-vs-branch or
   Cobertura interpretation, arithmetic, plateaus, project-wide coverage gaps,
   or coverage-backed test/CRAP priorities (coverage-analysis; use native
-  coverage tooling outside .NET); named-target CRAP (crap-score); test-mix/
-  happy-vs-error classification, tagging, or trait distributions
-  (test-tagging); new suites (code-testing-agent); assertion/smell audits; or
-  mutation tools.
+  coverage tooling outside .NET); named-target CRAP (crap-score); new suites
+  (code-testing-agent); assertion/smell audits; or mutation tools.
 license: MIT
 ---
 
 # Test Gap Analysis
 
-Answer one question: **which meaningful production-code changes would the
-existing tests fail to detect?** Use mutation reasoning to find candidates, then
-verify only the gaps you intend to report.
+Answer one question: **which caller-visible production behaviors could change
+without an existing test failing?** Mutation reasoning is a probe, not the goal.
+Inventory public outcomes first, then verify only credible gaps.
 
-## Scope before work
+## Decision flow
 
-1. Discover production and test files from manifests and file types, not only
-   prompt wording. After a narrow search misses, inspect the current directory
-   broadly before asking for paths.
-2. Classify the request:
+### 1. Set scope
 
-   | Request | Analysis |
-   |---|---|
-   | One function, class, file, or named risk | **Focused**: inventory every meaningful behavior in that scope, then execute only the 3-5 highest-risk candidate gaps |
-   | General "are these tests strong?" for a small component | **Focused**: cover each distinct boundary, guard, error, and calculation behavior without multiplying syntax variants |
-   | Explicit exhaustive audit | **Broad**: classify all meaningful mutation points; read [references/mutation-catalog.md](references/mutation-catalog.md) |
-   | Add or fix tests in an existing suite | Analyze first, then add tests only for executed survivors or demonstrated no-coverage behavior |
-   | Create a suite where none exists | Stop and use `code-testing-agent` |
+Discover production and test files from manifests and file types. After a narrow
+search misses, inspect the current directory broadly before asking for paths.
 
-Do not turn a focused question into a repository-wide audit. Do not create plan
-artifacts or a dashboard for a small suite.
+| Request | Action |
+|---|---|
+| One component or named risk | Inventory every high-risk public outcome in scope; do not edit production code unless verification was requested |
+| General small-component review | Inventory distinct outcomes and report caller-visible gaps from source/assertion mapping |
+| Explicit survivor verification | Inventory all requested outcomes; execute one representative observable candidate for each distinct high-risk outcome under verification, then classify it as **Survived** or **Killed** |
+| Explicit exhaustive audit | Read [references/mutation-catalog.md](references/mutation-catalog.md) and classify all meaningful candidates |
+| Add tests to an existing suite | Analyze first; add tests only for verified survivors or demonstrated no-coverage outcomes |
+| Create a new suite | Stop and use `code-testing-agent` |
 
-### Language lookup is conditional
+When the request names a risk, turn it into a one-line public-outcome allowlist
+before reading code. An outcome is not in scope merely because the same method writes it.
+For `money math`, allow computed or returned amounts, rates, tier/boundary
+choice, percentage base/order, floors/caps, and rounding; exclude non-monetary
+state predicates (including derived booleans), identity, and formatting. Private
+code is in scope only to trace an allowed outcome.
 
-Use the source and tests directly for familiar frameworks. Invoke
-`test-analysis-extensions` only when framework-specific discovery or assertion
-semantics are unclear. Routine C#/xUnit/MSTest/NUnit and Rust `#[test]` analysis
-does not require loading an extension.
+Do not expand a focused request into a repository audit, plan artifact, or
+dashboard. Use source and tests directly for familiar frameworks. Invoke
+`test-analysis-extensions` only when discovery or assertion semantics are
+unclear.
 
-## Workflow
+### 2. Establish one baseline
 
-### 1. Establish the baseline once
+Run the narrowest existing test command once. Choose it from the project
+manifest; Microsoft.Testing.Platform executables may require `dotnet run`.
+Confirm tests executed: exit 0 with build-only output is not green. If that one
+attempt cannot run the suite, do not troubleshoot the runner or try alternate
+commands for an advisory review; continue statically and label all candidates
+**unverified**. Do not infer a project-configuration cause from missing output;
+name a cause only when the command reports it.
 
-- Before selecting mutations, map each public method's switch/condition arms,
-  compound-input partitions, guard boundaries (invalid and both nearest valid
-  sides), errors, constants/rates, rounding, and composition steps to
-  assertions, including private-helper behavior. Treat each accepted exception
-  type, default/non-matching type, and retry/cutoff attempt partition as a
-  distinct behavior even when they share one expression.
-- The 3-5 budget limits execution, not discovery. Keep every distinct
-  unasserted behavior in the inventory.
-- Run the narrowest existing test command once. Require evidence that tests were
-  executed; exit 0 with only build output is not green. Inspect the project:
-  executable Microsoft.Testing.Platform tests may require `dotnet run`.
-- If the suite cannot run, continue with static reasoning but label every
-  proposed survivor **unverified**. Never claim empirical verification after a
-  failed restore, build, or test run.
+Missing runner output limits only claims of empirical mutation survival. It does
+not make source-proven facts tentative: a public outcome with no reaching test
+is still **No coverage**, and an exact expected value derived from the
+unmodified implementation is still actionable. State the baseline limitation
+once, then give the static source/assertion conclusion directly instead of
+hedging every row.
 
-### 2. Choose risk-ranked candidates
+For an advisory review such as "would tests catch this?", stop execution after
+that baseline. Source-to-assertion mapping is sufficient evidence for **No
+coverage** and **Candidate survivor (unverified)**. Trace or run the unmodified
+code once only when an original value is unclear. Apply mutations only for
+explicit verification, an exhaustive audit, or closing gaps with tests.
 
-Prioritize changes that could alter user-visible, financial, security, or error
-behavior:
+Any focused mutation budget limits execution, not discovery. Keep every
+distinct unasserted public outcome in the inventory.
 
-| Category | C# example | Rust example |
-|---|---|---|
-| Boundary | `>=` to `>` | `<=` to `<` |
-| Logic | `&&` to &#124;&#124;, remove a condition | flip/remove a boolean condition |
-| Guard/error | remove `ArgumentNullException` guard | `?` to `unwrap()`/`expect()`, change `Err` to `Ok` |
-| Arithmetic/return | `+` to `-`, wrong default | arithmetic flip, `Some`/`None` or `Ok`/`Err` swap |
+### 3. Inventory public outcomes
 
-Skip generated files, auto-properties, trivial forwarding code, logging-only
-changes, and equivalent mutations. Prefer one candidate per distinct behavior
-over many syntactic variants of the same gap.
+For each public entry point, map:
 
-Rank candidates in this order:
+- input partitions: classifier arms, compound conditions, invalid and
+  nearest-valid guard boundaries, and default cases;
+- each independent observation: returned field/variant, exception type,
+  invalid-input acceptance, public state transition, or external side effect;
+- private-helper composition, constants/rates, rounding, retries, cancellation,
+  and error propagation as observed through the public caller.
 
-1. Entirely unasserted public behavior or production branches.
-2. Security, financial, state-transition, and error-propagation behavior.
-3. Boundaries and exact outputs reached by weak assertions.
-4. Alternate operators, constants, rounding modes, and similar variants of
-   behavior that already has a meaningful assertion.
+Use `public input/sequence -> expected outcome -> existing assertion -> gap`.
+One asserted return field does not cover another. One allowed result does not
+cover its denial.
 
-Do not spend the focused execution budget on multiple variants of a covered
-branch while a separate production branch has no relevant assertion.
-For compact guard or classifier methods, finish the arm-by-arm inventory before
-selecting mutations. A killed cutoff at the maximum does not clear the nearest
-valid attempt; one accepted exception type does not clear its sibling or the
-non-matching default.
-If more than five high-risk behaviors are unasserted, execute the top 3-5 and
-keep the rest visible: use **No coverage** only when no test reaches the behavior;
-otherwise report **Candidate survivor (unverified)**, never **Survived**.
+**Money math:** inventory the no-op path, every rate/tier and exact boundary,
+operation order, percentage base or composition, floor/cap, and rounding. Trace
+private helpers through the public result. A test asserting only a broad range
+does not pin any exact amount. For each actionable money row, derive one witness
+input and its exact original result through the complete call chain; do not
+recommend a generic "assert the exact amount" without supplying that amount.
 
-### 3. Determine whether each candidate is already killed
+**Ordered guards and retries:** inventory `invalid below minimum | first valid |
+last allowed or retryable | first blocked | later blocked`. For an upper guard
+such as `value >= limit`, use `limit - 1`, `limit`, and `limit + 1`; the last
+witness exposes narrowing to `value == limit`. Inventory every accepted and
+rejected error class. When type matching is polymorphic, include a representative
+derived accepted type that would expose exact-runtime-type narrowing. A test at
+the first blocked value does not protect the last allowed or later blocked value.
 
-For each candidate:
+**Authorization:** enumerate each relevant identity/role, resource class, and
+action from the caller's view. Untested `false`, forbidden, and unchanged-role
+outcomes are first-class security gaps. Do not analyze variants of an allowed
+path while a denial outcome remains uninventoried. Check each public surface:
 
-1. Find the test that reaches the changed behavior.
-2. Check whether an assertion observes the changed result, exception, state, or
-   error variant.
-3. Classify it:
+- permission-returning APIs: every distinct role/resource class and every
+  returned capability independently;
+- action-dispatch APIs: each read/write/delete-style action branch, especially
+  paths that must return denial;
+- role/state transitions: accepted, rejected, invalid, null, and empty inputs,
+  including outcomes that must leave state unchanged.
 
-   | Result | Meaning |
-   |---|---|
-   | **Likely killed** | An existing assertion should fail; verify if execution is available |
-   | **Candidate survivor** | Covering tests appear not to detect the change; execute it before reporting **Survived** |
-   | **No coverage** | No test reaches the behavior |
-   | **Equivalent** | The change cannot alter behavior; omit it from findings |
+Reserve execution for wholly untested public branches before another variant
+of a partially covered helper. If more than five high-risk behaviors are
+unasserted, execute the top 3-5 and keep the rest visible as **No coverage** or
+**Candidate survivor (unverified)**.
 
-Keep a candidate only when a public observation differs between the original
-and mutation. If no public assertion can distinguish them, classify it
-**Equivalent**; do not recommend an internal-state test solely to expose it.
+Execution never replaces the ledger. Before mutating or answering, classify
+every required outcome, including each invalid input, guard boundary,
+classifier arm, action, and denial.
 
-### 4. Verify reportable survivors
+**Completeness checkpoint:** before selecting findings, explicitly account for
+every independent mode/flag, both zero and negative for a `<= 0` guard, every
+accepted exception class, and a representative derived accepted exception when
+matching is polymorphic. For a removed guard, trace the fallthrough: if it still
+produces the same public exception type, it is equivalent unless finer exception
+metadata is an established contract.
 
-If execution is available, a static candidate is not yet a verified survivor:
+### 4. Admit only observable candidates
 
-1. Apply one candidate mutation.
-2. Inspect the diff and confirm exactly one intended expression changed.
-   A no-op replacement or multi-site edit is not evidence. For value swaps, use
-   a temporary sentinel or replace the complete expression; sequential
-   replacements can accidentally rewrite the first replacement.
-3. Run the narrowest covering test.
-4. Still green means **Survived**; red means **Killed** for that exact edit only.
-5. Revert the mutation immediately.
-6. Confirm the original source and test are green before moving on.
+First replay each exact mutation against every existing asserted input or
+sequence with all arguments fixed. Any changed return, exception, state, or side
+effect is **Likely killed**; a dedicated single-purpose test is unnecessary.
+Never compare the mutant on one input with the original on another.
 
-Never leave a mutation in the workspace. When a user explicitly asks to
-"verify", every survivor and every killed claim used in the verdict or strengths
-must have run evidence. Otherwise label the claim static or return a smaller
-answer.
+For survivors, choose a witness before execution or reporting and state
+`witness -> original observation -> mutant observation`. Reuse it in the
+smallest test. Admit it only when the last two differ publicly after tracing the
+full call chain; otherwise choose a distinguishing witness or drop it.
 
-Before reporting, reconcile results with the behavior inventory. Every
-unasserted high-risk path must be **Survived**, **Candidate survivor
-(unverified)**, **No coverage**, or **Equivalent**; an executed kill on one path
-cannot silently clear an untested sibling.
+Exclude:
 
-**Stop conditions:**
+- edits that require inserting or reordering statements rather than changing or
+  removing an existing expression, condition, constant, return, or side effect;
+- edits that do not compile, including removal of a declaration whose value is
+  still referenced;
+- overflow behavior, exception message/`ParamName` metadata, or other semantics
+  not established by the current contract, source intent, or tests;
+- a removed guard or short-circuit that falls through to the same result,
+  exception, state, and side effects;
+- private representation changes that every public input sequence observes
+  identically, even if the suite stays green;
+- a mutation whose proposed test passes against both original and mutant;
+- boundary edits that return the same value on the distinguishing input; for
+  example, changing `result < floor ? floor : result` to `<=` is equivalent at
+  equality because both branches return `floor`;
+- a standalone auto-property or trivial one-line wrapper/predicate with no
+  meaningful branch, calculation, or side effect, unless the user names it;
+- hypothetical future impact, generated code, logging/formatting-only changes,
+  impossible values, and duplicate syntax variants.
 
-- Drop a candidate as soon as an existing assertion clearly kills it.
-- If representative high-risk candidates are killed and no credible survivor
-  remains, conclude that the suite is strong; do not search for trivial gaps to
-  fill a report.
-- Do not mutate every operator merely to calculate a score. Report a mutation
-  score only after an explicit exhaustive audit.
+Missing direct assertions do not prove **No coverage**: first trace existing
+assertions through public callers and shared branches. Missing assertions make
+an **observable** candidate a survivor; they do not make an inert mutation
+meaningful.
 
-### 5. Close gaps only when requested
+### 5. Rank and classify
+
+Rank: (1) security denials, financial outcomes, errors, and state changes;
+(2) wholly unasserted public outcomes; (3) boundaries or exact values reached by
+weak assertions; (4) alternate variants of already-asserted behavior.
+
+Finish the inventory before selecting mutations or a verdict. One killed
+attempt, exception type, or switch arm does not clear its siblings.
+
+Choose the verdict from the completed inventory:
+
+- **Strong** when core branches and primary boundaries are protected and only a
+  few validation or default-case variants remain;
+- **Mixed** when meaningful coverage exists but at least one important outcome
+  partition is unprotected;
+- **Weak** when important outcomes are broadly unprotected.
+
+A handful of validation gaps does not make an otherwise broad suite **Mixed**
+unless validation is the named risk or the gaps threaten security, data, or
+other contract-critical behavior.
+
+When the inventory meets the **Strong** criteria above, lead with **Strong** and
+name the protected boundaries and dual assertions before listing minor gaps. Do
+not open with `Mixed`, "only core paths", or a risk-heavy dashboard.
+
+Stop when existing assertions kill the remaining candidates or no credible
+public survivor remains. Do not mutate every operator merely to fill a report or
+calculate a score.
+
+| Result | Meaning |
+|---|---|
+| **Likely killed** | An existing assertion observes the changed outcome |
+| **Candidate survivor (unverified)** | Observable change appears unasserted; not executed |
+| **Survived** | Exact observable mutation executed and tests stayed green |
+| **No coverage** | No test reaches the public outcome; report the missing branch without inventing a survivor |
+| **Equivalent** | No public observation changes; omit from findings |
+
+Outside explicit verification, an exhaustive audit, or a requested test
+addition, execute no mutations. Do not mutate to confirm obvious no coverage.
+For explicit verification, execute one representative candidate per distinct
+high-risk outcome in scope; do not stop after the first one or two while another
+guard, action branch, error class, or denial remains unclassified. Omit
+equivalent syntax variants.
+
+### 6. Verify without creating false positives
+
+Enter this phase only for explicit verification, an exhaustive audit, or a
+requested test addition.
+
+1. Apply one candidate and confirm the diff changes exactly one intended
+   expression.
+2. Run the narrowest covering test: green means **Survived**, red means
+   **Killed**, for that edit only.
+3. Revert immediately and confirm the clean source/test baseline.
+4. After a green run, re-check the public counterfactual. Execution proves the
+   suite missed the edit, not that the edit changes behavior; drop inert or
+   unobservable mutants.
+
+Never leave mutations in the workspace. Before reporting, reconcile every
+unasserted high-risk outcome as **Survived**, **Candidate survivor
+(unverified)**, **No coverage**, or omitted **Equivalent**. Stop when no credible
+public gap remains; do not fill a report with internal details or calculate a
+score unless the user requested an exhaustive audit.
+
+### 7. Close gaps only when requested
 
 1. Add focused tests only for executed **Survived** mutations or demonstrated
    **No coverage** behavior.
@@ -165,6 +249,17 @@ cannot silently clear an untested sibling.
    per syntax change.
 6. Re-apply the original mutation and prove the new test kills it, then restore
    the source and run the narrow suite cleanly.
+7. If the fixture or repository supplies a canonical mutation verifier, run
+   that exact command after the tests are added and cite its successful result.
+   Hand-created substitute mutations, a broad green suite, or a test-count
+   increase do not replace the supplied oracle. Once every requested survivor
+   maps to a focused test and the canonical verifier passes, stop; extra tests
+   are not an advantage.
+8. When the request requires existing source or test files to remain unchanged,
+   compare each protected file byte-for-byte with its pre-edit snapshot and
+   report that evidence. Before adding a test, prove its witness differs from
+   every existing case on the relevant branch, boundary, or rounded result so a
+   nominally new test does not duplicate existing coverage.
 
 ## Output contract
 
@@ -173,21 +268,32 @@ Scale the response to the request.
 For focused or small analysis, return:
 
 1. A one-line verdict: **Strong**, **Mixed**, or **Weak**, with the reason.
-2. A compact findings table containing one row per distinct actionable
-   **Survived**, **Candidate survivor (unverified)**, or **No coverage** behavior.
-   Consolidate related low-risk variants instead of silently dropping a
-   separate high-risk behavior:
+2. For a **Strong** suite, one short strengths sentence naming the concrete
+   protected boundaries, guards, or paired observations that justify the verdict.
+3. One compact row per actionable **Survived**, **Candidate survivor
+   (unverified)**, or **No coverage** outcome. Before adding a row, apply the
+   outcome allowlist when the request names a risk, then apply the
+   observable-candidate rules; omit any candidate that fails either filter.
+   Include every high-risk outcome, use one row per distinct public outcome, and
+   consolidate only related low-risk variants:
 
-   | Risk | Location | Category/change | Result/evidence | Smallest test |
+   | Risk | Public outcome | Change | Result/evidence | Smallest test |
    |---|---|---|---|---|
 
-3. One short strengths sentence naming important killed behavior.
-4. When the request names exclusions, one short scope sentence naming the
+   Every gap needs a distinguishing witness and a concrete smallest test. An
+   error-path gap must name an invalid input and the expected error/result.
+
+4. For a **Mixed** or **Weak** suite, one short strengths sentence naming
+   important killed behavior.
+5. When the request names exclusions, one short scope sentence naming the
    generated, trivial, or unrelated code intentionally skipped.
 
+Do not repeat the table in prose or report discarded mutants, tool chronology,
+or in-flight reasoning.
+
 For an exhaustive audit, add counts for Killed / Survived / No coverage /
-Equivalent and group findings by risk. Do not publish in-flight reasoning or a
-score based on candidates you did not execute.
+Equivalent and group findings by risk. Count only executed or definitively
+classified candidates.
 
 For test additions, name the tests added, the verified mutations they kill, and
 the successful final command.
@@ -197,19 +303,17 @@ the successful final command.
 - A passing test that does not assert the changed outcome does not kill a
   mutation.
 - Coverage is per behavior partition. One switch/ternary arm or compound input
-  does not prove siblings: read does not prove write; null does not prove empty
-  or whitespace. A kill clears only the edit and path that ran.
+  does not prove siblings: allow does not prove deny; read does not prove write;
+  null does not prove empty or whitespace when those inputs have different
+  caller-visible outcomes. A kill clears only the edit and path that ran.
 - Private helpers reached through a public method remain in scope.
 - Error semantics are language-specific: in Rust, `?` propagation versus panic
-  is observable behavior; in C#, exception type and parameter guards are
-  observable behavior.
-- Derive recommended exact values through the complete production call chain
-  and probe the unmodified implementation when practical. For calculated
-  outputs, cover boundaries, rates/constants, rounding, and operation order;
-  isolate each stage plus one composition case. Never invent a numeric
-  expectation or generalize one mutation into unexecuted claims.
-- Lead with strengths when substantive mutations are killed. One minor survivor
-  does not make a suite weak.
+  is observable behavior; in C#, exception type and whether an input guard
+  accepts or rejects a value are observable behavior.
+- Cross-check every exact amount or boundary result against the unmodified
+  implementation or an existing exact assertion. If it cannot be checked,
+  state the behavioral relation without inventing a number.
+- Do not label a finding high-risk merely because a mutation survived.
 - Never recommend a redundant test for behavior the existing suite already
   protects.
 
@@ -217,7 +321,14 @@ the successful final command.
 
 - [ ] Scope stayed proportional to the request
 - [ ] The original suite passed, or static-only limits are explicit
-- [ ] Every reported survivor was executed when tooling was available
+- [ ] Every high-risk public outcome in scope was inventoried
+- [ ] Original and mutant have different caller-visible observations
+- [ ] Every outcome labeled **Survived** was executed; unexecuted candidates use
+      **Candidate survivor (unverified)**
 - [ ] Every temporary mutation was reverted
 - [ ] Findings exclude trivial, generated, and equivalent changes
 - [ ] Recommendations target only demonstrated gaps
+- [ ] Every public entry-point branch and each accepted exception type in scope
+      is explicitly accounted for
+- [ ] A supplied canonical mutation verifier was run and reported, not replaced
+      with an ad-hoc proxy
