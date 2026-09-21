@@ -9,7 +9,10 @@ import test from "node:test";
 import {
   comparisonToVerdict,
   classifyComparisonError,
+  continuedAfterSkillActivation,
   mergeComparisonReports,
+  postActivationFromRecords,
+  readNonActivationStimuli,
   splitVallyCommand,
   signTestPValue,
   trialDirection,
@@ -162,27 +165,26 @@ function runAdapter(
   trialCount = 5,
   expectedEvalFiles = [evalFile],
   experimentFactory = createExperiment,
+  repoRoot,
 ) {
   const runDir = experimentFactory(root);
   const outputRoot = join(root, "output");
   const expectedEvalsPath = join(root, "expected-evals.txt");
   writeFileSync(expectedEvalsPath, `${expectedEvalFiles.join("\n")}\n`);
   const fakeVally = createFakeVally(root, mode, trialCount);
-  const result = spawnSync(
-    process.execPath,
-    [
-      adapterPath,
-      "--experiment-dir",
-      runDir,
-      "--output-root",
-      outputRoot,
-      "--vally",
-      fakeVally.command,
-      "--expected-evals",
-      expectedEvalsPath,
-    ],
-    { encoding: "utf8" },
-  );
+  const args = [
+    adapterPath,
+    "--experiment-dir",
+    runDir,
+    "--output-root",
+    outputRoot,
+    "--vally",
+    fakeVally.command,
+    "--expected-evals",
+    expectedEvalsPath,
+  ];
+  if (repoRoot) args.push("--repo-root", repoRoot);
+  const result = spawnSync(process.execPath, args, { encoding: "utf8" });
   const verdictPath = join(
     outputRoot,
     "dotnet-diag",
@@ -224,6 +226,7 @@ test("retries a transient comparison error once", () => {
     assert.equal(verdict.underpowered, false);
     assert.equal(verdict.passed, true);
     assert.equal(verdict.state, VERDICT_STATES.VALID_PASS);
+    assert.equal(verdict.skillKind, "skill");
     assert.equal(verdict.recoveredErrors.length, 5);
     assert.match(processOutput(result), /without replacing successful judgments/);
   });
@@ -313,6 +316,31 @@ test("a malformed comparison report becomes one explicit invalid result", () => 
   });
 });
 
+test("an unreadable eval spec becomes one measurement-invalid result", () => {
+  withTempDir((root) => {
+    const { result, compareCount, verdict, outputRoot } = runAdapter(
+      root,
+      "clean",
+      5,
+      [evalFile],
+      createExperiment,
+      root,
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(compareCount, undefined);
+    assert.equal(verdict.state, VERDICT_STATES.INVALID_INCONCLUSIVE);
+    assert.equal(verdict.stateReason.code, "eval_spec_unreadable");
+    assert.equal(verdict.errors[0].phase, "adapter");
+    assert.match(verdict.errors[0].message, /cannot read eval spec/);
+
+    const summary = JSON.parse(readFileSync(join(outputRoot, "adapter-summary.json"), "utf8"));
+    assert.equal(summary.invalidEvalCount, 1);
+    assert.equal(summary.measurementInvalidEvalCount, 1);
+    assert.deepEqual(summary.measurementInvalidEvals, [evalFile]);
+  });
+});
+
 test("keeps a persistent comparison error visible after one retry", () => {
   withTempDir((root) => {
     const { result, compareCount, verdict } = runAdapter(root, "persistent");
@@ -367,7 +395,7 @@ test("reports a below-floor eval as underpowered rather than as a measurement fa
     assert.equal(verdict.state, VERDICT_STATES.INVALID_INCONCLUSIVE);
     assert.equal(verdict.stateReason.code, "underpowered");
     assert.equal(verdict.minCredibleTrials, 5);
-    assert.match(verdict.reason, /underpowered \(1 counted stimulus vote\(s\); a credible verdict needs at least 5/);
+    assert.match(verdict.reason, /underpowered \(1 preference-eligible stimulus vote\(s\); a credible verdict needs at least 5/);
     assert.match(verdict.reason, /won every one of them/);
     assert.match(verdict.reason, /repeated runs do not increase task breadth/);
     assert.match(result.stdout, /⚠️/);
@@ -404,6 +432,10 @@ test("writes an explicit invalid verdict for every expected eval", () => {
     assert.equal(
       missingResult.verdicts[0].stateReason.code,
       "missing_baseline_and_skilled_records",
+    );
+    assert.deepEqual(
+      missingResult.verdicts[0].activationContract.unmatchedDormancyStimuli,
+      [],
     );
 
     const summary = JSON.parse(readFileSync(join(outputRoot, "adapter-summary.json"), "utf8"));
@@ -537,6 +569,268 @@ const reportFromRepeatedScores = (scores, summaryOverrides = {}) =>
 
 const gate = (scores, summaryOverrides) =>
   comparisonToVerdict(reportFromScores(scores, summaryOverrides), IDENTITY, EMPTY_ROLES, new Set());
+
+test("ordered events require a non-skill tool call after activation", () => {
+  assert.equal(
+    continuedAfterSkillActivation({
+      trajectory: {
+        events: [
+          { type: "tool_call", data: { toolName: "view" } },
+          { type: "tool_call", data: { toolName: "skill" } },
+          { type: "skill_activation", data: { name: "example" } },
+        ],
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    continuedAfterSkillActivation({
+      trajectory: {
+        events: [
+          { type: "tool_call", data: { toolName: "skill" } },
+          { type: "skill_activation", data: { name: "example" } },
+          { type: "tool_call", data: { toolName: "view" } },
+        ],
+      },
+    }),
+    true,
+  );
+});
+
+test("post-activation telemetry distinguishes continuation from activation-only completion", () => {
+  const summary = postActivationFromRecords([
+    {
+      gradeResult: { passed: false },
+      trajectory: {
+        endReason: "completed",
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 1,
+          toolCallBreakdown: { skill: 1 },
+        },
+      },
+    },
+    {
+      gradeResult: { passed: true },
+      trajectory: {
+        endReason: "completed",
+        events: [
+          { type: "tool_call", data: { toolName: "skill" } },
+          { type: "skill_activation", data: { name: "example" } },
+          { type: "tool_call", data: { toolName: "view" } },
+        ],
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 3,
+          toolCallBreakdown: { skill: 1, view: 1, bash: 1 },
+        },
+      },
+    },
+    {
+      gradeResult: { passed: false },
+      trajectory: {
+        endReason: "completed",
+        events: [
+          { type: "tool_call", data: { toolName: "view" } },
+          { type: "tool_call", data: { toolName: "skill" } },
+          { type: "skill_activation", data: { name: "example" } },
+        ],
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 2,
+          toolCallBreakdown: { skill: 1, view: 1 },
+        },
+      },
+    },
+    {
+      gradeResult: { passed: true },
+      trajectory: {
+        endReason: "completed",
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 1,
+          toolCallBreakdown: { skill: 1 },
+        },
+      },
+    },
+    {
+      gradeResult: { passed: false },
+      trajectory: {
+        endReason: "agent_timeout",
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 1,
+          toolCallBreakdown: { skill: 1 },
+        },
+      },
+    },
+    {
+      gradeResult: { passed: true },
+      trajectory: {
+        endReason: "completed",
+        metrics: {
+          skillActivationCount: 0,
+          toolCallCount: 0,
+        },
+      },
+    },
+  ]);
+
+  assert.deepEqual(summary, {
+    activatedRuns: 5,
+    continuedRuns: 1,
+    activationOnlyCompletions: 3,
+    failedActivationOnlyCompletions: 2,
+    unclassifiedRuns: 1,
+  });
+});
+
+test("scenario results retain post-activation telemetry for isolated and plugin runs", () => {
+  const records = [
+    {
+      gradeResult: { passed: false, score: 0 },
+      trajectory: {
+        endReason: "completed",
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 1,
+          toolCallBreakdown: { skill: 1 },
+        },
+      },
+    },
+  ];
+  const verdict = comparisonToVerdict(
+    reportFromScores([0]),
+    IDENTITY,
+    {
+      baselineByStim: new Map(),
+      skilledByStim: new Map([["Scenario 1", records]]),
+      pluginByStim: new Map([["Scenario 1", records]]),
+      hasPlugin: true,
+    },
+    new Set(),
+  );
+
+  assert.deepEqual(verdict.scenarios[0].skillActivationIsolated, {
+    activated: true,
+    activatedRuns: 1,
+    continuedRuns: 0,
+    activationOnlyCompletions: 1,
+    failedActivationOnlyCompletions: 1,
+    unclassifiedRuns: 0,
+  });
+  assert.deepEqual(
+    verdict.scenarios[0].skillActivationPlugin,
+    verdict.scenarios[0].skillActivationIsolated,
+  );
+});
+
+test("dormancy parser matches PyYAML Boolean false spellings exactly", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-yaml-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "  - name: LowerFalse",
+        "    expect_activation: false",
+        "  - name: TitleFalse",
+        "    expect_activation: False",
+        "  - name: UpperFalse",
+        "    expect_activation: FALSE",
+        "  - name: LowerNo",
+        "    expect_activation: no",
+        "  - name: TitleNo",
+        "    expect_activation: No",
+        "  - name: UpperNo",
+        "    expect_activation: NO",
+        "  - name: LowerOff",
+        "    expect_activation: off",
+        "  - name: TitleOff",
+        "    expect_activation: Off",
+        "  - name: UpperOff",
+        "    expect_activation: OFF",
+        "  - name: SingleLetter",
+        "    expect_activation: n",
+        "  - name: MixedCase",
+        "    expect_activation: fAlse",
+        "  - name: Commented",
+        "    expect_activation: false # dormancy contract",
+        "  - name: CommentWithoutSeparator",
+        "    expect_activation: false#not-a-comment",
+        "  - name: Prefix",
+        "    expect_activation: off-target",
+        "  - name: Quoted",
+        '    expect_activation: "false"',
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      [
+        "LowerFalse",
+        "TitleFalse",
+        "UpperFalse",
+        "LowerNo",
+        "TitleNo",
+        "UpperNo",
+        "LowerOff",
+        "TitleOff",
+        "UpperOff",
+        "Commented",
+      ],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser reads a zero-indent stimuli sequence", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-zero-indent-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "- name: Dormant",
+        "  expect_activation: false",
+        "- name: Active",
+        "  expect_activation: true",
+        "defaults:",
+        "  runs: 1",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual([...readNonActivationStimuli("eval.yaml", root)], ["Dormant"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser reads flow-mapping stimuli", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-flow-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "  - {name: Dormant, expect_activation: false}",
+        "  - {expect_activation: false, name: 'Dormant, quoted'}",
+        "  - {name: Active, expect_activation: true}",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      ["Dormant", "Dormant, quoted"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a retry fills only errored slots and freezes successful judgments", () => {
   const primary = reportFromRepeatedScores([null, 0.4, 0.4, 0.4, 0.4]);
@@ -682,6 +976,139 @@ test("scenario evidence collapses repeated runs to one authoritative vote", () =
   assert.equal(verdict.passed, false);
 });
 
+test("dormancy scenarios are retained but excluded from preference inference", () => {
+  const report = reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, -0.4]);
+  for (const trial of report.stimuli.flatMap((stimulus) => stimulus.trials)) {
+    trial.baselinePassed = true;
+    trial.treatmentPassed = true;
+  }
+
+  const verdict = comparisonToVerdict(
+    report,
+    IDENTITY,
+    EMPTY_ROLES,
+    new Set(["Scenario 6"]),
+  );
+
+  assert.equal(verdict.passed, true);
+  assert.equal(verdict.state, VERDICT_STATES.VALID_PASS);
+  assert.equal(verdict.stimulusVoteCount, 5);
+  assert.equal(verdict.signTest.wins, 5);
+  assert.equal(verdict.signTest.losses, 0);
+  assert.equal(verdict.scenarioEvidence.count, 5);
+  assert.equal(verdict.excludedScenarioEvidence.count, 1);
+  assert.equal(verdict.excludedScenarioEvidence.losses, 1);
+  assert.equal(verdict.excludedScenarioEvidence.gateEligible, false);
+  assert.equal(verdict.comparisonTrialEvidence.count, 6, "all-run reliability evidence is retained");
+  assert.equal(verdict.completionTransitions.bothPassed, 6, "completion accounting retains dormancy runs");
+  assert.equal(verdict.activationContract.count, 1);
+  assert.equal(verdict.activationContract.passed, true);
+  assert.equal(verdict.scenarios[5].preferenceGateEligible, false);
+  assert.equal(
+    verdict.scenarios[5].preferenceGateExclusionReason,
+    "activation_contract_only",
+  );
+  assert.deepEqual(verdict.activationContract.unmatchedDormancyStimuli, []);
+});
+
+test("dormancy annotations that match no observed stimulus remain visible", () => {
+  const verdict = comparisonToVerdict(
+    reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4]),
+    IDENTITY,
+    EMPTY_ROLES,
+    new Set(["Renamed scenario"]),
+  );
+
+  assert.equal(verdict.passed, true, "unmatched annotations do not change the pass rule");
+  assert.deepEqual(
+    verdict.activationContract.unmatchedDormancyStimuli,
+    ["Renamed scenario"],
+  );
+});
+
+test("unexpected dormancy activation blocks an otherwise passing preference verdict", () => {
+  const report = reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0]);
+  const roles = {
+    ...EMPTY_ROLES,
+    skilledByStim: new Map([
+      [
+        "Scenario 6",
+        [{ trajectory: { metrics: { skillActivationCount: 1 } } }],
+      ],
+    ]),
+  };
+
+  const verdict = comparisonToVerdict(
+    report,
+    IDENTITY,
+    roles,
+    new Set(["Scenario 6"]),
+  );
+
+  assert.equal(verdict.signTest.wins, 5);
+  assert.equal(verdict.passed, false);
+  assert.equal(verdict.state, VERDICT_STATES.VALID_NO_CHANGE);
+  assert.equal(verdict.stateReason.code, "activation_contract_failed");
+  assert.equal(verdict.activationContract.passed, false);
+  assert.deepEqual(verdict.activationContract.failures, [
+    {
+      scenarioName: "Scenario 6",
+      expected: "dormant",
+      observed: "activated",
+      satisfied: false,
+    },
+  ]);
+});
+
+test("activation contract failure remains definitive when preference is underpowered", () => {
+  const report = reportFromScores([0.4, 0.4, 0.4, 0.4, 0]);
+  const roles = {
+    ...EMPTY_ROLES,
+    skilledByStim: new Map([
+      [
+        "Scenario 5",
+        [{ trajectory: { metrics: { skillActivationCount: 1 } } }],
+      ],
+    ]),
+  };
+
+  const verdict = comparisonToVerdict(
+    report,
+    IDENTITY,
+    roles,
+    new Set(["Scenario 5"]),
+  );
+
+  assert.equal(verdict.underpowered, true, "preference power remains visible");
+  assert.equal(verdict.passed, false);
+  assert.equal(verdict.state, VERDICT_STATES.VALID_NO_CHANGE);
+  assert.equal(verdict.stateReason.code, "activation_contract_failed");
+});
+
+test("comparison errors on dormancy scenarios still fail closed", () => {
+  const report = reportFromStimulusRuns([[0.4], [0.4], [0.4], [0.4], [0.4], [null]]);
+  report.stimuli[5].trials[0] = {
+    trialIndex: 0,
+    score: 0,
+    winner: "tie",
+    errored: true,
+    evidence: "Comparison judge failed",
+  };
+  report.summary.erroredCount = 1;
+
+  const verdict = comparisonToVerdict(
+    report,
+    IDENTITY,
+    EMPTY_ROLES,
+    new Set(["Scenario 6"]),
+  );
+
+  assert.equal(verdict.conclusive, false);
+  assert.equal(verdict.passed, false);
+  assert.equal(verdict.state, VERDICT_STATES.INVALID_INCONCLUSIVE);
+  assert.equal(verdict.excludedScenarioEvidence.unscoredCount, 1);
+});
+
 test("repeated runs cannot manufacture significance from four of five stimuli", () => {
   const report = reportFromStimulusRuns([
     [0.4, 0.4, 0.4],
@@ -796,7 +1223,7 @@ test("a tie-starved record says no record could have passed, not that none did",
   assert.equal(v.signTest.discordant, 1);
   assert.equal(v.passed, false);
   assert.equal(v.regressed, false);
-  assert.match(v.reason, /4 of 5 stimulus vote\(s\) tied, leaving only 1 discordant stimulus vote\(s\)/);
+  assert.match(v.reason, /4 of 5 preference-eligible stimulus vote\(s\) tied, leaving only 1 discordant preference vote\(s\)/);
   assert.match(v.reason, /no record could have passed here — this is not a measured null/);
   assert.match(v.reason, /inert/);
 
