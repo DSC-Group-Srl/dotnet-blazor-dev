@@ -28,7 +28,7 @@ if (opts.help || (opts.format !== "full" && opts.format !== "simple")) {
   console.log(`Usage:
   node consolidate.mjs --format <full|simple> [--output <file>] [--root <dir>] [--commit <sha>] [<results.json>...]
 
-Consolidates per-skill results.json into a markdown summary table.
+Consolidates per-target results.json into a markdown summary table.
 
 Options:
   --format <full|simple>  full: all metrics and details (workflow summary).
@@ -41,12 +41,19 @@ Options:
   process.exit(opts.help ? 0 : 1);
 }
 
+// The agent timeout-retry tree holds a second, narrower native copy of one
+// scenario, kept only for audit. It is never a skill result, so a recursive
+// walk must step over it — the same exclusion the workflow collectors apply.
+const EXCLUDED_DIRECTORIES = new Set(["_agent-timeout-retry"]);
+
 function findNamedFiles(dir, fileName) {
   const out = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...findNamedFiles(full, fileName));
-    else if (entry.name === fileName) out.push(full);
+    if (entry.isDirectory()) {
+      if (EXCLUDED_DIRECTORIES.has(entry.name)) continue;
+      out.push(...findNamedFiles(full, fileName));
+    } else if (entry.name === fileName) out.push(full);
   }
   return out;
 }
@@ -154,6 +161,11 @@ function isPreferenceRegression(verdict) {
       && (verdict.state == null || verdict.state === STATE.NO_CHANGE));
 }
 
+function hasActivationContractFailure(verdict) {
+  return verdict.activationContract?.evaluated !== false
+    && verdict.activationContract?.passed === false;
+}
+
 function td(value) {
   return String(value ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }
@@ -173,6 +185,17 @@ function fmtOverfit(verdict) {
   return `${icon}${score}`;
 }
 
+function targetActivation(verdict, scenario, arm) {
+  if (verdict.skillKind === "agent") {
+    return arm === "isolated"
+      ? scenario?.agentActivationIsolated
+      : scenario?.agentActivationPlugin;
+  }
+  return arm === "isolated"
+    ? scenario?.skillActivationIsolated
+    : scenario?.skillActivationPlugin;
+}
+
 function activationStats(verdict) {
   const expected = (verdict.scenarios ?? []).filter(
     (scenario) => scenario?.expectActivation !== false,
@@ -180,11 +203,15 @@ function activationStats(verdict) {
   if (expected.length === 0) return null;
   const total = expected.length;
   const isolated = expected.filter(
-    (scenario) => scenario?.skillActivationIsolated?.activated,
+    (scenario) => targetActivation(verdict, scenario, "isolated")?.activated,
   ).length;
-  const hasPlugin = expected.some((scenario) => scenario?.skillActivationPlugin != null);
+  const hasPlugin = expected.some(
+    (scenario) => targetActivation(verdict, scenario, "plugin") != null,
+  );
   const plugin = hasPlugin
-    ? expected.filter((scenario) => scenario?.skillActivationPlugin?.activated).length
+    ? expected.filter(
+        (scenario) => targetActivation(verdict, scenario, "plugin")?.activated,
+      ).length
     : null;
   return {
     total,
@@ -199,6 +226,28 @@ function activationCell(verdict) {
   if (!stats) return "—";
   const plugin = stats.plugin === null ? "" : `; plugin ${stats.plugin}/${stats.total}`;
   return `isolated ${stats.isolated}/${stats.total}${plugin}`;
+}
+
+function postActivationStats(verdict) {
+  const scenarios = verdict.scenarios ?? [];
+  const expected = scenarios.filter(
+    (scenario) => scenario?.expectActivation !== false,
+  );
+  const isolatedFailures = expected.reduce(
+    (sum, scenario) =>
+      sum + (scenario?.skillActivationIsolated?.failedActivationOnlyCompletions ?? 0),
+    0,
+  );
+  const pluginFailures = scenarios.reduce(
+    (sum, scenario) =>
+      sum + (scenario?.skillActivationPlugin?.failedActivationOnlyCompletions ?? 0),
+    0,
+  );
+  return {
+    isolatedFailures,
+    pluginFailures,
+    hasFailures: isolatedFailures > 0 || pluginFailures > 0,
+  };
 }
 
 function scenarioStats(scenario) {
@@ -218,41 +267,57 @@ function scenarioStats(scenario) {
   };
 }
 
-function isWeakOrWarningScenario(scenario) {
+function isWeakOrWarningScenario(verdict, scenario) {
   const { netWin } = scenarioStats(scenario);
+  const isolatedActivation = targetActivation(verdict, scenario, "isolated");
+  const pluginActivation = targetActivation(verdict, scenario, "plugin");
   return netWin <= 0
     || scenario?.timedOut === true
+    || (scenario?.skillActivationIsolated?.failedActivationOnlyCompletions ?? 0) > 0
+    || (scenario?.skillActivationPlugin?.failedActivationOnlyCompletions ?? 0) > 0
+    || (scenario?.expectActivation === false
+      && isolatedActivation?.activated === true)
     || (scenario?.expectActivation !== false
-      && (!scenario?.skillActivationIsolated?.activated
-        || (scenario?.skillActivationPlugin != null
-          && !scenario.skillActivationPlugin.activated)));
+      && (!isolatedActivation?.activated
+        || (pluginActivation != null && !pluginActivation.activated)));
 }
 
 function scenarioTable(verdict, weakOnly = false) {
   const scenarios = (verdict.scenarios ?? []).filter(
-    (scenario) => !weakOnly || isWeakOrWarningScenario(scenario),
+    (scenario) => !weakOnly || isWeakOrWarningScenario(verdict, scenario),
   );
   if (scenarios.length === 0) return [];
   const rows = [
     weakOnly ? "**Weak or warning scenarios:**" : "**Scenario evidence:**",
     "",
-    "| Scenario | Net win | Δ Pref | Runs (W/T/L) |",
-    "|---|---|---|---|",
+    "| Scenario | Preference gate | Net win | Δ Pref | Runs (W/T/L) |",
+    "|---|---|---|---|---|",
   ];
   for (const scenario of scenarios) {
     const { netWin, wins, ties, losses } = scenarioStats(scenario);
     const icon = netWin > 0 ? "▲" : netWin < 0 ? "▼" : "=";
     const magnitude = typeof scenario.meanScore === "number" ? scenario.meanScore : 0;
+    const eligibility = scenario.preferenceGateEligible === false
+      ? "Excluded (activation contract)"
+      : "Eligible";
     rows.push(
-      `| ${icon} ${td(html(scenario.scenarioName))} | ${pct(netWin)} | ${pct(magnitude)} | ${wins}/${ties}/${losses} |`,
+      `| ${icon} ${td(html(scenario.scenarioName))} | ${eligibility} | ${pct(netWin)} | ${pct(magnitude)} | ${wins}/${ties}/${losses} |`,
     );
   }
   return rows;
 }
 
 function representativeEvidence(verdict) {
-  for (const scenario of verdict.scenarios ?? []) {
-    if (!isWeakOrWarningScenario(scenario)) continue;
+  const scenarios = [...(verdict.scenarios ?? [])].sort((left, right) => {
+    const priority = (scenario) => {
+      if (scenario.preferenceGateEligible !== false) return 0;
+      if (targetActivation(verdict, scenario, "isolated")?.activated === true) return 1;
+      return 2;
+    };
+    return priority(left) - priority(right);
+  });
+  for (const scenario of scenarios) {
+    if (!isWeakOrWarningScenario(verdict, scenario)) continue;
     const trials = (scenario.trials ?? []).filter((trial) => !trial.errored);
     const trial = trials.find((candidate) => trialDirection(candidate) < 0)
       ?? trials.find((candidate) => trialDirection(candidate) === 0);
@@ -279,6 +344,7 @@ function resultLabel(verdict) {
   }
   if (verdictState(verdict) === STATE.PASS) return "✅ Improved";
   if (isObjectiveRegression(verdict)) return "🔻 Objective regression";
+  if (hasActivationContractFailure(verdict)) return "⛔ Activation contract failed";
   if (isPreferenceRegression(verdict)) return "📉 Preference loss (report only)";
   return "➖ Not proven improved";
 }
@@ -294,13 +360,35 @@ function gateEvidence(verdict) {
   const pValue = typeof verdict.signTest?.pValue === "number"
     ? verdict.signTest.pValue.toFixed(3)
     : "—";
-  return `n=${count}; ${wins}W/${ties}T/${losses}L; d=${discordant}; p=${pValue}; net ${pct(verdict.netWin)}`;
+  const excluded = verdict.excludedScenarioEvidence?.count ?? 0;
+  const exclusion = excluded ? `; ${excluded} dormancy excluded` : "";
+  return `n=${count}; ${wins}W/${ties}T/${losses}L; d=${discordant}; p=${pValue}; net ${pct(verdict.netWin)}${exclusion}`;
 }
 
 function warningParts(verdict) {
   const warnings = [];
+  if (hasActivationContractFailure(verdict)) {
+    warnings.push(
+      `Dormancy contract: ${verdict.activationContract.violated} unexpected activation(s)`,
+    );
+  }
+  const unmatchedDormancy = verdict.activationContract?.unmatchedDormancyStimuli?.length ?? 0;
+  if (unmatchedDormancy > 0) {
+    warnings.push(`${countNoun(unmatchedDormancy, "dormancy annotation")} unmatched`);
+  }
   const activation = activationStats(verdict);
   if (activation?.hasMissing) warnings.push(`Activation: ${activationCell(verdict)}`);
+  const postActivation = postActivationStats(verdict);
+  if (postActivation.isolatedFailures > 0) {
+    warnings.push(
+      `Activation-only stop: isolated ${countNoun(postActivation.isolatedFailures, "failed run")}`,
+    );
+  }
+  if (postActivation.pluginFailures > 0) {
+    warnings.push(
+      `Activation-only stop: plugin ${countNoun(postActivation.pluginFailures, "failed run")}`,
+    );
+  }
   const timeoutCount = (verdict.scenarios ?? []).filter(
     (scenario) => scenario?.timedOut === true,
   ).length;
@@ -341,6 +429,13 @@ function nextAction(verdict) {
   if (state === STATE.REGRESSION) {
     return "Inspect objective completion losses and fix them before merge.";
   }
+  if (hasActivationContractFailure(verdict)) {
+    return "Narrow skill routing so the listed off-target scenarios stay dormant.";
+  }
+  const postActivation = postActivationStats(verdict);
+  if (postActivation.hasFailures) {
+    return "Inspect activation-only failed runs before rewriting skill content; the model stopped after loading a skill.";
+  }
   if (isPreferenceRegression(verdict)) {
     return "Inspect losing stimuli and fix skill behavior; this is not objective completion proof.";
   }
@@ -357,6 +452,9 @@ function nextAction(verdict) {
   const actions = [];
   const activation = activationStats(verdict);
   if (activation?.hasMissing) actions.push("Fix activation gaps");
+  if (postActivationStats(verdict).hasFailures) {
+    actions.push("Inspect activation-only stops");
+  }
   if ((verdict.scenarios ?? []).some((scenario) => scenario?.timedOut === true)) {
     actions.push("Inspect timeouts");
   }
@@ -382,10 +480,16 @@ const invalidCount = verdicts.filter(
   (verdict) => isIndeterminate(verdict) && verdict.underpowered !== true,
 ).length;
 const regressedCount = verdicts.filter(isObjectiveRegression).length;
+const activationContractFailureCount = verdicts.filter(
+  (verdict) => !isIndeterminate(verdict)
+    && !isObjectiveRegression(verdict)
+    && hasActivationContractFailure(verdict),
+).length;
 const preferenceRegressedCount = verdicts.filter(
   (verdict) =>
     !isIndeterminate(verdict)
     && !isObjectiveRegression(verdict)
+    && !hasActivationContractFailure(verdict)
     && isPreferenceRegression(verdict),
 ).length;
 const noChangeCount = verdicts.length
@@ -393,8 +497,11 @@ const noChangeCount = verdicts.length
   - underpoweredCount
   - invalidCount
   - regressedCount
+  - activationContractFailureCount
   - preferenceRegressedCount;
-const skillCount = new Set(verdicts.map((verdict) => verdict.skillName)).size;
+const targetCount = new Set(
+  verdicts.map((verdict) => `${verdict.skillKind ?? "skill"}:${verdict.skillName}`),
+).size;
 const models = [...new Set(verdicts.map((verdict) => verdict.model))];
 const judges = [...new Set(verdicts.map((verdict) => verdict.judgeModel))];
 const objectiveGateEnabled = regressedCount > 0
@@ -402,7 +509,7 @@ const objectiveGateEnabled = regressedCount > 0
 const isFull = opts.format === "full";
 
 const compactHeader = [
-  "Skill",
+  "Target",
   "Model",
   "Verdict",
   "Gate evidence",
@@ -411,7 +518,7 @@ const compactHeader = [
   "Next action",
 ];
 const fullHeader = [
-  "Skill",
+  "Target",
   "Model",
   "Verdict",
   "Gate evidence",
@@ -424,13 +531,14 @@ const fullHeader = [
   "Next action",
 ];
 const header = isFull ? fullHeader : compactHeader;
-const lines = ["## 📊 Skill Evaluation Results", ""];
+const lines = ["## 📊 Skill and Agent Evaluation Results", ""];
 
 lines.push(
-  `${countNoun(verdicts.length, "model/skill result")} across `
-  + `${countNoun(skillCount, "skill")} and ${countNoun(models.length, "model")} — `
+  `${countNoun(verdicts.length, "model/target result")} across `
+  + `${countNoun(targetCount, "target")} and ${countNoun(models.length, "model")} — `
   + `✅ **${passedCount} improved**, ➖ **${noChangeCount} not proven improved**, `
   + `⚠️ **${underpoweredCount + invalidCount} invalid or underpowered**, `
+  + `⛔ **${countNoun(activationContractFailureCount, "activation contract failure")}**, `
   + `📉 **${preferenceRegressedCount} preference losses (report only)**`
   + `${regressedCount > 0 ? `, 🔻 **${regressedCount} objective regressions**` : ""}.`,
 );
@@ -479,13 +587,14 @@ if (objectiveGateEnabled) {
 }
 lines.push("");
 lines.push(
-  "A result passes only when the aggregate net win across distinct-stimulus votes is at least 20% "
-  + "and an exact one-sided sign-test result of `p ≤ 0.05`. Repeated runs measure reliability only.",
+  "A result passes only when preference-eligible distinct-stimulus votes have aggregate net win "
+  + "of at least 20% and an exact one-sided sign-test result of `p ≤ 0.05`, and every explicit "
+  + "dormancy activation contract passes. Repeated runs measure reliability only.",
 );
 lines.push("");
 
 if (verdicts.length === 0) {
-  lines.push("_No skill verdicts were produced._");
+  lines.push("_No target verdicts were produced._");
 } else {
   lines.push(`| ${header.join(" | ")} |`);
   lines.push(`|${header.map(() => "---").join("|")}|`);
@@ -521,9 +630,10 @@ if (verdicts.length === 0) {
   lines.push("");
   lines.push("- **✅ Improved** — the result passed both the statistical gate and the 20% practical net-win floor.");
   lines.push("- **➖ Not proven improved** — the result is valid but did not pass both gates. This is not automatically a regression.");
-  lines.push("- **⚠️ Invalid / underpowered** — the gate withheld a quality verdict. Fix the measurement before judging the skill.");
+  lines.push("- **⚠️ Invalid / underpowered** — the gate withheld a quality verdict. Fix the measurement before judging the target.");
+  lines.push("- **⛔ Activation contract failed** — the isolated target activated on an explicit dormancy scenario. Dormancy preference is excluded, but this routing failure still blocks a pass.");
   lines.push("- **📉 Preference loss** — the LLM judge credibly preferred baseline. It is report-only, not objective completion proof.");
-  lines.push("- **Gate evidence** — `n` distinct-stimulus votes, W/T/L stimulus votes, `d` discordant votes, exact one-sided `p`, and net win. The `p` value applies to one model/skill result; no matrix-wide multiple-comparison correction is applied.");
+  lines.push("- **Gate evidence** — `n` preference-eligible distinct-stimulus votes, W/T/L stimulus votes, `d` discordant votes, exact one-sided `p`, net win, and the count of separately retained dormancy stimuli. The `p` value applies to one model/target result; no matrix-wide multiple-comparison correction is applied.");
   lines.push("- **Overfit** — overfitting-judge severity (✅ Low, 🟡 Moderate, 🔴 High, — none) and score.");
   lines.push("- **Warnings** — activation, timeout, retry recovery, or unresolved comparison conditions that need attention.");
   if (isFull) {
@@ -543,9 +653,10 @@ if (verdicts.length === 0) {
   const rank = (verdict) => {
     if (isObjectiveRegression(verdict)) return 0;
     if (isIndeterminate(verdict)) return 1;
-    if (isPreferenceRegression(verdict)) return 2;
-    if (verdictState(verdict) === STATE.NO_CHANGE) return 3;
-    return 4;
+    if (hasActivationContractFailure(verdict)) return 2;
+    if (isPreferenceRegression(verdict)) return 3;
+    if (verdictState(verdict) === STATE.NO_CHANGE) return 4;
+    return 5;
   };
   const detailBlocks = candidates
     .map((verdict) => {
@@ -645,7 +756,7 @@ const markdown = lines.join("\n");
 if (opts.output) {
   writeFileSync(opts.output, markdown);
   console.error(
-    `Wrote ${opts.format} summary (${countNoun(verdicts.length, "model/skill result")}) to ${opts.output}`,
+    `Wrote ${opts.format} summary (${countNoun(verdicts.length, "model/target result")}) to ${opts.output}`,
   );
 } else {
   process.stdout.write(`${markdown}\n`);

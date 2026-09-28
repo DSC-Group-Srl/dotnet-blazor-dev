@@ -1,17 +1,65 @@
 # Investigating Evaluation Results
 
-> **⚠️ Skill evaluations now run on the Vally harness.** As of the Vally migration, the LLM eval pipeline (`evaluation.yml`) no longer uses `skill-validator evaluate`; it runs Vally via `eng/vally-adapter/` and uploads `vally-results-*` artifacts. For investigating current eval failures, use the guide at `eng/vally-adapter/InvestigatingResults.md` in the repository root instead. This document describes the legacy `skill-validator evaluate` schema and is retained for historical results and reference. (The `skill-validator check` **linter** is unaffected and still runs via `skill-check.yml`.)
+> **⚠️ Skill evaluations run on Vally; custom-agent evaluations use this runner
+> as an execution lane.** The CI pipeline adapts native agent results through
+> `eng/vally-adapter/adapt-agent-results.mjs` before publishing them, so use
+> `eng/vally-adapter/InvestigatingResults.md` for the final schema. This
+> document describes the raw `skill-validator evaluate` output retained under
+> `_agent-evaluation/` for custom-agent diagnosis and for historical results.
+>
+> The current Vally workflow makes one targeted recovery attempt for executor
+> `session.idle` timeouts before adaptation. See
+> `executor-retry-summary.json` in the result artifact and the current guide for
+> the bounded retry and fail-closed rules.
+> Native-agent `RunMetrics.errorCount` is diagnostic and may include recovered
+> tool-call failures. Adaptation invalidates a scenario only for terminal
+> evidence: an explicit execution error, a missing or timed-out required arm, a
+> failed run, or a missing pairwise result.
 
-> **Current Vally schema:** `state` is authoritative:
+> The workflow token preflight tries another pool candidate for HTTP 429 or 402
+> quota exhaustion and for the paired heading and token-environment lines in
+> the Copilot CLI's no-authentication setup block. Unrelated service and
+> configuration failures remain terminal.
+
+> PR session replay publishing is auxiliary. A missing or invalid
+> `SKILLS_DATA_TOKEN`, or one that cannot authenticate for a non-mutating
+> `git push --dry-run` to `dotnet/skills-data`, is detected before replay
+> artifacts are processed. The degradation is shown in workflow annotations and
+> the PR report but does not override authoritative evaluation verdicts.
+> Scheduled and main session-data publishing remains strict.
+
+> Current Vally PR evaluations default to `claude-sonnet-5` and `gpt-5.6-luna`,
+> with judges `gpt-5.6-terra` and `claude-haiku-4.5`, respectively.
+> Explicit profiles and the scheduled cadence can select other models.
+> These defaults do not change the model fields in historical results or the
+> legacy schema below. Health and issue-triage workflow models are separate.
+
+> Current Vally runs use a version-checked SDK 1.0.11/1.0.13 startup guard. It waits for
+> filesystem-provider setup before sessions start and shares concurrent startup
+> calls. Session-provider errors are harness failures, not skill-quality verdicts.
+> This does not change the historical result schema documented below.
+
+> **Vally schema:** Vally adapter results use an independently owned and
+> versioned schema. Consult the current Vally investigation guide for its
+> schema version and fields. `state` is authoritative:
 > `VALID_PASS`, `VALID_REGRESSION`, `VALID_NO_CHANGE`, or
 > `INVALID_INCONCLUSIVE`. Use `stateReason` and `errors[]` for machine-readable
 > causes. `preferenceRegressed` is report-only LLM preference evidence and is
 > not an objective completion regression. `adapter-summary.json` reconciles the
 > exact expected-eval manifest with observed and written results.
+> Native-agent baseline-pass/isolated-fail completion evidence can produce
+> `VALID_REGRESSION` even when preference evidence has fewer than five eligible
+> stimuli, including on an `expect_activation: false` scenario. Execution,
+> timeout, missing-arm, and comparison-invalid evidence still takes precedence.
+> Both completion values must be explicit booleans; a missing isolated
+> completion value remains measurement-invalid instead of becoming a regression.
 > `practicalSignificance` adds the 20% net-win floor. Objective completion is a
 > separately defined tri-state over explicitly selected deterministic graders;
 > aggregate Vally pass booleans remain report-only. These fields do not exist
-> in the legacy schema documented below.
+> in the legacy schema documented below. Do not pass Vally results to
+> `skill-validator consolidate`; it accepts only the legacy skill-validator
+> schema. Malformed or unsupported inputs make consolidation return a nonzero
+> exit code, even when it can still write a partial diagnostic summary.
 
 This guide is intended primarily for AI agents investigating skill evaluation failures, though humans will find it useful too. It documents the `results.json` schema, common failure patterns, and recommended fixes.
 
@@ -60,6 +108,8 @@ Each file contains a top-level object with:
 
 | Field | Description |
 |-------|-------------|
+| `schemaOwner` | `skill-validator`. This distinguishes the retired evaluator output from Vally adapter results |
+| `schemaVersion` | Legacy skill-validator results schema version. The first explicit version is `1`; older unversioned files remain readable |
 | `model` | Model used for agent runs |
 | `judgeModel` | Model used for judging |
 | `timestamp` | When the results were written (UTC) |
@@ -71,7 +121,9 @@ Each verdict contains:
 
 | Field | Description |
 |-------|-------------|
-| `skillName` | Name of the skill being evaluated |
+| `schemaOwner` / `schemaVersion` | The same legacy schema identity, repeated so standalone `verdict.json` files are self-describing |
+| `skillKind` | `skill` or `agent`; native custom-agent runs set `agent` before CI adaptation |
+| `skillName` | Compatibility field containing the skill or custom-agent name |
 | `passed` | Overall pass/fail |
 | `scenarios[]` | Array of per-scenario comparisons |
 | `overfittingResult` | Overfitting analysis (if enabled) |
@@ -92,9 +144,16 @@ Each scenario includes two required runs (baseline + isolated). It may also incl
 | `isolatedBreakdown` | Per-metric contribution to the score (see below) |
 | `pluginBreakdown` | Per-metric contribution to the score (see below); optional and only populated when a plugin run is present |
 | `pairwiseResult` | Judge's rubric-by-rubric comparison |
-| `perRunScores` | Per-run improvement scores as a flat array of numbers (one per run); when a plugin run is present, each value is `min(isolated, plugin)` for that run; when no plugin run is present (`skilledPlugin` is null), each value is the isolated improvement score for that run |
+| `perRunScores` | Per-run improvement scores used by the statistical gate. Agent evaluations always use isolated-vs-baseline scores because the plugin arm is diagnostic. Skill evaluations use `min(isolated, plugin)` when a plugin run is present and the isolated score otherwise |
 
-> **Note:** Scenarios do not have a `passed` field. To determine pass/fail for an individual scenario, check whether `improvementScore >= 0`. This is the effective score: when no plugin run is present it equals `isolatedImprovementScore`; when a plugin run is present it is the min of isolated and plugin scores. The `passed` field exists only at the verdict level (per-skill).
+> **Note:** Scenarios do not have a `passed` field. To determine pass/fail for an individual scenario, check whether `improvementScore >= 0`. For skills, this effective score is the minimum of isolated and plugin scores when both arms exist. For agents, it is always the isolated score; `pluginImprovementScore` and `pluginBreakdown` remain diagnostic production-surface telemetry. The `passed` field exists only at the verdict level.
+
+> **Agent activation:** Expected target-agent activation in the isolated arm is a verdict gate. Missing target activation in the plugin arm is diagnostic telemetry and is included in logs and reason text, but does not set `skillNotActivated`, change `failureKind`, or fail the verdict.
+
+> **Plugin skill staging:** Plugin runs load staged copies of manifest-declared
+> skills rather than exposing the source directories directly. Skill directories
+> and `SKILL.md` files must remain inside the plugin without symlink/reparse-point
+> components, and linked descendants are omitted while copying the skill tree.
 
 > **Reused baselines:** When the run was invoked with `--baseline-from`, the `baseline` arm is not executed — its `metrics` and `judgeResult` come from the shared baseline file produced earlier with `--baseline-out` (computed once, honoring `--runs`). Such scenarios are reported with the `baseline-reused` session phase and a `reused` baseline status. The baseline file is keyed on `--model` and `--judge-model` plus, per scenario, a SHA-256 of the prompt and a composite SHA-256 over its setup inputs (copied test files, explicit setup files, and setup commands) and its evaluation criteria (rubric, assertions, expect/reject tools, and turn/token/timeout limits); reuse fails fast if the agent model, judge model, or any prompt-plus-setup-plus-criteria identity is missing, so the baseline you compare against is always identity-matched and a shared prompt across cases with different fixtures or rubrics cannot cross-contaminate. Because the baseline output is identical across every skill/agent that consumes the same file, this acts as a shared control group and removes baseline run-to-run variance from cross-skill comparisons.
 
@@ -171,6 +230,77 @@ Several scenario-level options in `eval.yaml` are relevant when diagnosing failu
 - **Increase `timeout`** in `eval.yaml` — 180s is often not enough for scenarios that involve code generation. Try 360s.
 - **Restructure the prompt** to discourage bash exploration (e.g., "Show me the code" rather than "Create a project")
 - **Add `reject_tools: ["bash"]`** if the scenario should be answerable without shell commands
+
+**In CI:** a required arm that times out makes the whole eval
+measurement-invalid, even when every other scenario produced clean evidence. The
+evaluation workflow therefore runs `eng/vally-adapter/retry-agent-timeouts.mjs`
+before the adapter. It re-runs only the timed-out scenario, using
+`skill-validator evaluate --target "<agent>" --scenario "<name>"`, writes that
+retry into its own `--results-dir`, and replaces only that one scenario record
+in the native results file. The target filter prevents another agent with the
+same scenario name from entering the retry. The agent identity is validated as
+a safe single path segment before timeout lookup or retry/audit storage.
+The retry result must contain exactly one verdict total, for that target, and
+exactly one scenario. The original timeout must already have a pairwise
+judgment with valid winner/magnitude, rubric, reasoning, and position-swap
+consistency fields.
+Because the retry never shares a
+results directory, its sessions never merge with the first attempt's: every
+role/session record stays unique and the `rejudge` pairing rules that reject
+duplicate completed roles still apply unchanged. The retry judges the arms it
+re-runs, so no separate `rejudge` pass is needed.
+
+The retry is deliberately narrow. It fires only when a wall-clock timeout is the
+scenario's sole defect; an `executionError`, `failedRunCount > 0`, a missing
+arm, missing boolean completion evidence, a missing or malformed pairwise
+judgment, objective baseline-pass/isolated-fail completion regression, or a
+measured negative improvement/routing failure from non-timed-out baseline and
+isolated arms is never retried. In particular, a plugin-only timeout cannot
+erase a completed objective regression by replacing the whole scenario. A
+negative score from a baseline- or isolated-arm timeout remains eligible because
+the timeout contaminated the score. Ineligible
+timeout scenarios remain listed as unresolved diagnostics
+instead of disappearing from retry accounting. A second timeout,
+more than two timed-out scenarios, an effective per-scenario three-arm retry
+cost (including `constraints.max_duration`) that exceeds the bounded recovery
+window, or any unexpected retry shape leaves the original measurement in place
+and keeps the eval invalid. The systemic scenario-count guard runs before
+individual budget filtering, so a widespread timeout never triggers a partial
+subset of retries. Check
+`agent-timeout-retry-summary.json` in the leg artifact for
+`plannedScenarioCount`, `recoveredScenarioCount`, `unresolvedScenarioCount`,
+`ineligibleScenarioCount`, `budgetSkippedScenarioCount`, `clearedAggregates`,
+and a per-scenario reason. `plannedScenarioCount` includes every named
+required-arm timeout before eligibility filtering.
+
+After replacement, recovery recomputes execution, isolated target-agent
+activation, unexpected activation, and completion-regression state from all
+surviving scenarios. It clears stale `failureKind`/`skillNotActivated` values
+when the evidence no longer supports them, while any true remaining failure
+stays fail-closed. If stale `skill_not_activated` masked an isolated completion
+regression, recomputation restores `completion_regression`. It also clears the
+old `confidenceInterval`,
+`isSignificant`, and `overfittingResult`; the changed sample cannot reuse the
+first attempt's aggregate statistics, and native agent evals do not produce an
+overfitting assessment. The adapter derives the completion and activation gates
+from scenarios again instead of trusting legacy aggregate flags.
+
+Retry runs first write outside `RESULTS_DIR`, so a workflow `SIGTERM` cannot
+leave a retry `results.json` where recursive discovery can count it. Each retry
+uses a unique attempt directory, so a re-entered recovery process cannot accept
+an older attempt's result when the current attempt produced none. The current
+attempt must contain exactly one native `results.json`; zero or multiple
+aggregates remain unresolved, and colliding aggregates are retained under their
+relative audit paths for diagnosis. After a
+retry process finishes, its `sessions.db`, logs, and raw result (renamed
+`retry-results.json`) are copied under `_agent-timeout-retry/` in the main
+evaluation artifact. Workflow result counting, consolidation, summaries, and
+dashboard publication also exclude this subtree as defense in depth, so exactly
+one adapted per-agent `results.json` is authoritative.
+
+`--target` and `--scenario` are repeatable, match names case-insensitively, and
+exit `1` when a name matches nothing, so a typo can never quietly evaluate an
+empty set and report a clean run.
 
 ### 2. Baseline already bad
 

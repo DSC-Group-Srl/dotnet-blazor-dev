@@ -16,9 +16,10 @@
  *      than differencing two independently-graded absolute scores. This drives
  *      the PR gate/comment: a skill passes only on a credible *net win* (more
  *      wins than losses by an exact one-sided sign test at 5%) over at least
- *      MIN_CREDIBLE_STIMULI distinct stimulus votes. Repeated runs measure
- *      within-stimulus reliability and do not increase that sample. Below the
- *      floor the verdict is reported as underpowered rather than as a failure.
+ *      MIN_CREDIBLE_STIMULI preference-eligible distinct stimulus votes.
+ *      Explicit dormancy stimuli remain activation-contract and diagnostic
+ *      evidence but do not enter preference inference. Repeated runs measure
+ *      within-stimulus reliability and do not increase that sample.
  *   4. Emit a per-skill results.json that is a SUPERSET carrying BOTH:
  *        - the compare-based preference verdict (for gating + PR comment), and
  *        - absolute per-role dashboard fields (baseline / skilledIsolated /
@@ -239,17 +240,19 @@ function evalIdentity(evalFile) {
 // skill is *expected to stay dormant* isn't flagged on the dashboard as a
 // missing activation. This is a deliberately small, block-scalar-aware YAML
 // scan rather than a full parser so the adapter keeps its zero-dependency
-// contract (no `yaml` module is guaranteed on CI runners). If the file can't be
-// read, the set is empty and every scenario defaults to expect-activation —
-// matching the historical behavior.
+// contract (no `yaml` module is guaranteed on CI runners). Reading the spec is
+// required because silently defaulting to expect-activation can remove an
+// explicit dormancy contract from the pass gate.
 function readNonActivationStimuli(evalFile, repoRoot) {
   const path = resolve(repoRoot ?? ".", evalFile);
-  if (!existsSync(path)) return new Set();
   let text;
   try {
     text = readFileSync(path, "utf-8");
-  } catch {
-    return new Set();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const readError = new Error(`cannot read eval spec ${evalFile} at ${path}: ${detail}`);
+    readError.code = "eval_spec_unreadable";
+    throw readError;
   }
   const lines = text.split(/\r?\n/);
   const indentOf = (l) => l.length - l.trimStart().length;
@@ -260,8 +263,47 @@ function readNonActivationStimuli(evalFile, repoRoot) {
     }
     return t;
   };
-  const isFalsey = (v) => /^(false|no|off)\b/i.test(v.trim());
+  const isFalsey = (v) =>
+    /^(?:false|False|FALSE|no|No|NO|off|Off|OFF)(?:\s+#.*)?$/.test(v.trim());
   const result = new Set();
+
+  const flowMappingEntries = (value) => {
+    const match = /^\{(.*)\}\s*(?:#.*)?$/.exec(value.trim());
+    if (!match) return null;
+
+    const entries = [];
+    let start = 0;
+    let quote = null;
+    let escaped = false;
+    let depth = 0;
+    const content = match[1];
+    for (let index = 0; index < content.length; index++) {
+      const char = content[index];
+      if (quote === '"') {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === quote) quote = null;
+        continue;
+      }
+      if (quote === "'") {
+        if (char === "'" && content[index + 1] === "'") index++;
+        else if (char === quote) quote = null;
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        quote = char;
+      } else if (char === "{" || char === "[") {
+        depth++;
+      } else if (char === "}" || char === "]") {
+        depth--;
+      } else if (char === "," && depth === 0) {
+        entries.push(content.slice(start, index));
+        start = index + 1;
+      }
+    }
+    entries.push(content.slice(start));
+    return entries;
+  };
 
   // Advance to the line after the top-level `stimuli:` key.
   let i = 0;
@@ -298,23 +340,30 @@ function readNonActivationStimuli(evalFile, repoRoot) {
     const line = lines[i];
     if (line.trim() === "" || /^\s*#/.test(line)) continue;
     const ind = indentOf(line);
-    if (ind === 0) {
-      flush();
-      break;
-    }
-
     const dash = /^(\s*)-\s+(\S.*)$/.exec(line);
     if (dash && (itemDashIndent === null || ind === itemDashIndent)) {
       flush();
       itemDashIndent = ind;
       const rest = dash[2];
       keyIndent = line.length - rest.length;
-      const kv = /^([A-Za-z0-9_]+):\s?(.*)$/.exec(rest);
-      if (kv) {
-        applyKey(kv[1], kv[2]);
-        skipBlockScalar(kv[2]);
+      const flowEntries = flowMappingEntries(rest);
+      if (flowEntries) {
+        for (const entry of flowEntries) {
+          const kv = /^\s*([A-Za-z0-9_]+):\s?(.*?)\s*$/.exec(entry);
+          if (kv) applyKey(kv[1], kv[2]);
+        }
+      } else {
+        const kv = /^([A-Za-z0-9_]+):\s?(.*)$/.exec(rest);
+        if (kv) {
+          applyKey(kv[1], kv[2]);
+          skipBlockScalar(kv[2]);
+        }
       }
       continue;
+    }
+    if (ind === 0) {
+      flush();
+      break;
     }
 
     // Only mapping keys at the item's key column belong to the stimulus itself;
@@ -370,6 +419,86 @@ function mean(nums) {
   return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
 }
 
+function continuedAfterSkillActivation(record) {
+  const events = record.trajectory?.events;
+  if (!Array.isArray(events) || events.length === 0) return null;
+
+  let activated = false;
+  for (const event of events) {
+    if (event?.type === "skill_activation" || event?.type === "skill.invoked") {
+      activated = true;
+      continue;
+    }
+    if (
+      activated
+      && (event?.type === "tool_call" || event?.type === "tool.execution_start")
+    ) {
+      const toolName = event?.data?.toolName ?? event?.data?.name;
+      if (toolName && toolName !== "skill") return true;
+    }
+  }
+
+  return activated ? false : null;
+}
+
+function postActivationFromRecords(records) {
+  const summary = {
+    activatedRuns: 0,
+    continuedRuns: 0,
+    activationOnlyCompletions: 0,
+    failedActivationOnlyCompletions: 0,
+    unclassifiedRuns: 0,
+  };
+
+  for (const record of records ?? []) {
+    const metrics = record.trajectory?.metrics;
+    const activationCount = metrics?.skillActivationCount ?? 0;
+    if (activationCount <= 0) continue;
+
+    summary.activatedRuns += 1;
+    const orderedContinuation = continuedAfterSkillActivation(record);
+    if (orderedContinuation === true) {
+      summary.continuedRuns += 1;
+      continue;
+    }
+    if (
+      orderedContinuation === false
+      && record.trajectory?.endReason === "completed"
+    ) {
+      summary.activationOnlyCompletions += 1;
+      if (record.gradeResult?.passed === false) {
+        summary.failedActivationOnlyCompletions += 1;
+      }
+      continue;
+    }
+
+    const toolCallCount = metrics?.toolCallCount;
+    const skillToolCallCount =
+      metrics?.toolCallBreakdown?.skill ?? activationCount;
+    if (!Number.isFinite(toolCallCount) || !Number.isFinite(skillToolCallCount)) {
+      summary.unclassifiedRuns += 1;
+      continue;
+    }
+
+    if (
+      orderedContinuation === null
+      && toolCallCount === skillToolCallCount
+      && toolCallCount > 0
+      && record.trajectory?.endReason === "completed"
+    ) {
+      summary.activationOnlyCompletions += 1;
+      if (record.gradeResult?.passed === false) {
+        summary.failedActivationOnlyCompletions += 1;
+      }
+      continue;
+    }
+
+    summary.unclassifiedRuns += 1;
+  }
+
+  return summary.activatedRuns > 0 ? summary : null;
+}
+
 /**
  * Collapse one variant's records for a single stimulus into the absolute-role
  * shape the dashboard consumes: quality (0-5 overallScore), efficiency metrics
@@ -405,7 +534,13 @@ function roleFromRecords(records) {
   const activated = records.some((r) => (r.trajectory?.metrics?.skillActivationCount ?? 0) > 0);
   const timedOut = records.some((r) => r.trajectory?.endReason === "agent_timeout");
 
-  return { overallScore, activated, timedOut, metrics };
+  return {
+    overallScore,
+    activated,
+    timedOut,
+    metrics,
+    postActivation: postActivationFromRecords(records),
+  };
 }
 
 // Dashboard role object: { judgeResult: { overallScore }, metrics }.
@@ -759,6 +894,470 @@ function mergeComparisonReports(primaryReport, retryReport) {
 }
 
 /**
+ * A comparison retry judges the whole slice again, so one unlucky judge session
+ * can time out twice in a row and strand an otherwise-complete measurement. The
+ * targeted pass below re-judges only the individual slots that are still errored
+ * for a transient reason, which is both cheaper and far less likely to repeat
+ * the stall. Keep it small: more than a handful of stranded slots is a systemic
+ * judge outage, not bad luck, and must stay measurement-invalid.
+ */
+const MAX_TARGETED_COMPARISON_SLOTS = 3;
+
+/** Trial index encoded in a Vally executor shardKey (`...::trial-<n>`). */
+function recordTrialIndex(record) {
+  const match = /::trial-(\d+)$/.exec(String(record?.shardKey ?? ""));
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * The completed executor trajectories behind one comparison slot.
+ *
+ * Uses the same canonical stimulus accessor as the rest of the adapter, so a
+ * record that carries its stimulus under `gradeResult.stimulusName` or
+ * `stimulusName` is matched exactly as it is everywhere else.
+ */
+function recordsForComparisonSlot(records, stimulusName, trialIndex) {
+  return (records ?? []).filter(
+    (record) =>
+      // `stimulusOf` dereferences the record directly, so guard it here: a
+      // truncated or partly written trajectory file can yield a null entry, and
+      // a throw would take down the whole recovery pass.
+      record != null &&
+      stimulusOf(record) === stimulusName &&
+      recordTrialIndex(record) === trialIndex,
+  );
+}
+
+function isCompleteExecutorRecord(record) {
+  return (
+    record?.type === "trial-result" &&
+    record.status === "success" &&
+    record.trajectory != null
+  );
+}
+
+function trialIndexEvidenceForStimulus(records, stimulusName, expectedVariant) {
+  const indices = new Set();
+  const counts = new Map();
+  let invalidCount = 0;
+  const variantMismatches = [];
+  for (const record of records ?? []) {
+    if (record == null || stimulusOf(record) !== stimulusName) continue;
+    const trialIndex = recordTrialIndex(record);
+    if (record.variant != null && record.variant !== expectedVariant) {
+      variantMismatches.push({
+        trialIndex: Number.isInteger(trialIndex) ? trialIndex : null,
+        variant: record.variant,
+      });
+    }
+    if (!Number.isInteger(trialIndex) || trialIndex < 0) {
+      invalidCount++;
+    } else {
+      indices.add(trialIndex);
+      counts.set(trialIndex, (counts.get(trialIndex) ?? 0) + 1);
+    }
+  }
+  const duplicateIndices = [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([trialIndex]) => trialIndex);
+  return { indices, invalidCount, duplicateIndices, variantMismatches };
+}
+
+function sameIntegerSet(left, right) {
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+function targetedSlotIdentityErrors(
+  report,
+  baselineRecords,
+  skilledRecords,
+  baselineVariant = "baseline",
+  skilledVariant = "skilled",
+) {
+  const errors = new Map();
+  for (const stimulus of report?.stimuli ?? []) {
+    const stimulusName = stimulus?.stimulusName;
+    if (!stimulusName) continue;
+    const comparisonIndices = new Set(
+      (stimulus.trials ?? [])
+        .map((trial) => trial?.trialIndex)
+        .filter((trialIndex) => Number.isInteger(trialIndex) && trialIndex >= 0),
+    );
+    const baselineEvidence = trialIndexEvidenceForStimulus(
+      baselineRecords,
+      stimulusName,
+      baselineVariant,
+    );
+    const skilledEvidence = trialIndexEvidenceForStimulus(
+      skilledRecords,
+      stimulusName,
+      skilledVariant,
+    );
+    const baselineIndices = baselineEvidence.indices;
+    const skilledIndices = skilledEvidence.indices;
+    if (
+      baselineEvidence.variantMismatches.length > 0 ||
+      skilledEvidence.variantMismatches.length > 0
+    ) {
+      const describe = (mismatches) =>
+        mismatches
+          .map(
+            ({ trialIndex, variant }) =>
+              `trial ${trialIndex ?? "<invalid>"}=${JSON.stringify(variant)}`,
+          )
+          .join(", ");
+      errors.set(stimulusName, {
+        phase: "comparison_pairing",
+        kind: "permanent",
+        code: "targeted_slot_variant_mismatch",
+        message:
+          `Executor source-file variant mismatch for "${stimulusName}": ` +
+          `baseline expected ${JSON.stringify(baselineVariant)} ` +
+          `[${describe(baselineEvidence.variantMismatches)}], ` +
+          `skilled expected ${JSON.stringify(skilledVariant)} ` +
+          `[${describe(skilledEvidence.variantMismatches)}]`,
+      });
+      continue;
+    }
+    if (
+      baselineEvidence.invalidCount > 0 ||
+      skilledEvidence.invalidCount > 0 ||
+      baselineEvidence.duplicateIndices.length > 0 ||
+      skilledEvidence.duplicateIndices.length > 0 ||
+      !sameIntegerSet(comparisonIndices, baselineIndices) ||
+      !sameIntegerSet(comparisonIndices, skilledIndices)
+    ) {
+      const values = (set) => `[${[...set].sort((a, b) => a - b).join(", ")}]`;
+      errors.set(stimulusName, {
+        phase: "comparison_pairing",
+        kind: "permanent",
+        code: "targeted_slot_trial_identity_mismatch",
+        message:
+          `Comparison/executor trial identity mismatch for "${stimulusName}": ` +
+          `comparison=${values(comparisonIndices)}, ` +
+          `baseline=${values(baselineIndices)} (${baselineEvidence.invalidCount} invalid, ` +
+          `${baselineEvidence.duplicateIndices.length} duplicate), ` +
+          `skilled=${values(skilledIndices)} (${skilledEvidence.invalidCount} invalid, ` +
+          `${skilledEvidence.duplicateIndices.length} duplicate)`,
+      });
+    }
+  }
+  return errors;
+}
+
+/**
+ * Slots that are still errored after the slice-level retry and whose latest
+ * failure is a transient judge fault (session.idle timeout, throttling, 5xx).
+ *
+ * Permanent and unclassifiable judge faults are never returned, and a trial that
+ * produced a verdict — including a loss or a dormancy-contract failure — is not
+ * errored at all, so it can never enter this list.
+ */
+function transientComparisonSlots(report) {
+  const keyCounts = comparisonTrialKeyCounts(report);
+  const slots = [];
+  for (const stimulus of report?.stimuli ?? []) {
+    for (const trial of stimulus.trials ?? []) {
+      if (!trial.errored) continue;
+      const key = comparisonTrialKey(stimulus.stimulusName, trial);
+      if (key === null || keyCounts.get(key) !== 1) continue;
+      const originalError = classifyComparisonError(trial.evidence);
+      const finalError = trial.retryError ?? originalError;
+      const coarseRetryCrashed =
+        finalError.code === "comparison_retry_invocation_failed";
+      if (finalError.kind !== "transient" && !(coarseRetryCrashed && originalError.kind === "transient")) {
+        continue;
+      }
+      slots.push({
+        key,
+        stimulusName: stimulus.stimulusName,
+        trialIndex: trial.trialIndex,
+        error: finalError.kind === "transient" ? finalError : originalError,
+        priorAttemptHistory:
+          report.retrySummary?.persistentErrors?.find(
+            (entry) =>
+              entry.stimulusName === stimulus.stimulusName
+              && entry.trialIndex === trial.trialIndex,
+          )?.attemptHistory ?? [
+            { attempt: 1, ...originalError },
+            ...(trial.retryError ? [{ attempt: 2, ...trial.retryError }] : []),
+          ],
+      });
+    }
+  }
+  return slots;
+}
+
+/**
+ * Re-judge one comparison slot from its preserved executor trajectories.
+ *
+ * The narrowed slice holds exactly one baseline and one treatment trajectory, so
+ * the retry report must describe exactly one trial for the planned stimulus. Any
+ * other shape is ambiguous and leaves the original error in place.
+ */
+function recoverComparisonSlot(slot, config) {
+  const baselineSlot = recordsForComparisonSlot(
+    config.baselineRecords,
+    slot.stimulusName,
+    slot.trialIndex,
+  );
+  const skilledSlot = recordsForComparisonSlot(
+    config.skilledRecords,
+    slot.stimulusName,
+    slot.trialIndex,
+  );
+  if (baselineSlot.length !== 1 || skilledSlot.length !== 1) {
+    // Missing evidence and duplicate evidence are different faults: the first
+    // means the slot has no preserved trajectory to re-judge, the second means
+    // the slot does not identify a single trajectory. Both are fail-closed, but
+    // they need different investigation, so they must not share one code.
+    const missing = baselineSlot.length === 0 || skilledSlot.length === 0;
+    return {
+      ok: false,
+      error: {
+        phase: "comparison_pairing",
+        kind: "permanent",
+        code: missing
+          ? "targeted_slot_trajectory_missing"
+          : "targeted_slot_trajectory_ambiguous",
+        message:
+          `Expected exactly one preserved baseline and treatment trajectory for the slot, ` +
+          `found ${baselineSlot.length} baseline and ${skilledSlot.length} treatment record(s)`,
+      },
+    };
+  }
+  if (
+    !isCompleteExecutorRecord(baselineSlot[0]) ||
+    !isCompleteExecutorRecord(skilledSlot[0])
+  ) {
+    const describe = (record) =>
+      `type=${record?.type ?? "<missing>"} ` +
+      `status=${record?.status ?? "<missing>"} ` +
+      `trajectory=${record?.trajectory == null ? "missing" : "present"}`;
+    return {
+      ok: false,
+      error: {
+        phase: "comparison_pairing",
+        kind: "permanent",
+        code: "targeted_slot_trajectory_incomplete",
+        message:
+          `Expected successful complete executor trajectories, found ` +
+          `baseline ${describe(baselineSlot[0])}; ` +
+          `treatment ${describe(skilledSlot[0])}`,
+      },
+    };
+  }
+
+  const baselineVariant = config.baselineVariant ?? "baseline";
+  const skilledVariant = config.skilledVariant ?? "skilled";
+  const baselineRecordVariant = baselineSlot[0]?.variant;
+  const skilledRecordVariant = skilledSlot[0]?.variant;
+  if (
+    (baselineRecordVariant != null && baselineRecordVariant !== baselineVariant)
+    || (skilledRecordVariant != null && skilledRecordVariant !== skilledVariant)
+  ) {
+    return {
+      ok: false,
+      error: {
+        phase: "comparison_pairing",
+        kind: "permanent",
+        code: "targeted_slot_variant_mismatch",
+        message:
+          `Expected preserved variants ${baselineVariant}/${skilledVariant}, found ` +
+          `${baselineRecordVariant ?? "<source-file>"}/${skilledRecordVariant ?? "<source-file>"}`,
+      },
+    };
+  }
+
+  const stem = `${config.filePrefix}__slot${config.slotOrdinal}`;
+  const baselineSliceFile = join(config.workDir, `${stem}__baseline.jsonl`);
+  const skilledSliceFile = join(config.workDir, `${stem}__skilled.jsonl`);
+  const outFile = join(config.workDir, `${stem}__compare.jsonl`);
+  writeFileSync(baselineSliceFile, `${JSON.stringify(baselineSlot[0])}\n`);
+  writeFileSync(skilledSliceFile, `${JSON.stringify(skilledSlot[0])}\n`);
+
+  let retryReport;
+  try {
+    retryReport = config.compare(baselineSliceFile, skilledSliceFile, outFile);
+  } catch (err) {
+    return {
+      ok: false,
+      error: {
+        phase: "comparison_judge",
+        kind: "unknown",
+        code: "targeted_retry_invocation_failed",
+        message: err instanceof Error ? err.message : String(err),
+      },
+    };
+  }
+
+  const allTrials = (retryReport?.stimuli ?? [])
+    .flatMap((stimulus) => stimulus.trials ?? []);
+  const trials = (retryReport?.stimuli ?? [])
+    .filter((stimulus) => stimulus.stimulusName === slot.stimulusName)
+    .flatMap((stimulus) => stimulus.trials ?? []);
+  if (allTrials.length !== 1 || trials.length !== 1) {
+    return {
+      ok: false,
+      error: {
+        phase: "comparison_judge",
+        kind: "unknown",
+        code: "targeted_retry_result_ambiguous",
+        message:
+          `Targeted comparison retry returned ${allTrials.length} total trial(s), ` +
+          `${trials.length} for the planned slot`,
+      },
+    };
+  }
+  if (trials[0].errored) {
+    return { ok: false, error: classifyComparisonError(trials[0].evidence) };
+  }
+  const validWinner = new Set(["treatment", "baseline", "tie"]).has(
+    trials[0].winner,
+  );
+  if (!validWinner && !Number.isFinite(trials[0].score)) {
+    return {
+      ok: false,
+      error: {
+        phase: "comparison_judge",
+        kind: "permanent",
+        code: "targeted_retry_result_invalid",
+        message:
+          "Targeted comparison retry returned a trial without a valid winner or numeric score",
+      },
+    };
+  }
+  return { ok: true, trial: trials[0] };
+}
+
+/**
+ * Bounded recovery pass for transient comparison-judge faults.
+ *
+ * Re-judges each still-errored transient slot on its own, replaces only those
+ * slots, and leaves every successful judgment frozen. Unresolved slots stay
+ * errored so the measurement-validity gate keeps failing the leg.
+ */
+function recoverTransientComparisonSlots(primaryReport, config) {
+  const compare = config.compare ?? runCompare;
+  const maxSlots = config.maxSlots ?? MAX_TARGETED_COMPARISON_SLOTS;
+  const slots = transientComparisonSlots(primaryReport);
+  const identityErrors = targetedSlotIdentityErrors(
+    primaryReport,
+    config.baselineRecords,
+    config.skilledRecords,
+    config.baselineVariant ?? "baseline",
+    config.skilledVariant ?? "skilled",
+  );
+  const targeted = {
+    maxSlots,
+    plannedSlotCount: slots.length,
+    attemptedSlotCount: 0,
+    recoveredSlotCount: 0,
+    unresolvedSlotCount: 0,
+    skippedReason: null,
+    recoveredSlots: [],
+    unresolvedSlots: [],
+  };
+  if (slots.length === 0) return primaryReport;
+  if (slots.length > maxSlots) {
+    targeted.unresolvedSlotCount = slots.length;
+    targeted.skippedReason =
+      `${slots.length} comparison slot(s) remain transiently errored, above the ` +
+      `targeted recovery limit of ${maxSlots}; treating this as a systemic judge failure.`;
+    warn(targeted.skippedReason);
+    const skipped = structuredClone(primaryReport);
+    skipped.retrySummary = { ...(skipped.retrySummary ?? {}), targetedRecovery: targeted };
+    return skipped;
+  }
+
+  const recovered = new Map();
+  for (const [index, slot] of slots.entries()) {
+    warn(
+      `Re-judging transient comparison slot "${slot.stimulusName}" trial ${slot.trialIndex} ` +
+        `(${slot.error.code}) from preserved executor trajectories`,
+    );
+    targeted.attemptedSlotCount++;
+    const identityError = identityErrors.get(slot.stimulusName);
+    const outcome = identityError
+      ? { ok: false, error: identityError }
+      : recoverComparisonSlot(slot, {
+          ...config,
+          compare,
+          slotOrdinal: index + 1,
+        });
+    if (outcome.ok) {
+      recovered.set(slot.key, { slot, trial: outcome.trial });
+      targeted.recoveredSlotCount++;
+      targeted.recoveredSlots.push({
+        stimulusName: slot.stimulusName,
+        trialIndex: slot.trialIndex,
+        recoveredFrom: slot.error,
+      });
+    } else {
+      targeted.unresolvedSlotCount++;
+      targeted.unresolvedSlots.push({
+        stimulusName: slot.stimulusName,
+        trialIndex: slot.trialIndex,
+        attemptHistory: [
+          ...slot.priorAttemptHistory,
+          { attempt: 3, ...outcome.error },
+        ],
+      });
+    }
+  }
+
+  if (recovered.size === 0) {
+    const unchanged = structuredClone(primaryReport);
+    unchanged.retrySummary = { ...(unchanged.retrySummary ?? {}), targetedRecovery: targeted };
+    return unchanged;
+  }
+
+  const report = structuredClone(primaryReport);
+  for (const stimulus of report.stimuli ?? []) {
+    stimulus.trials = (stimulus.trials ?? []).map((trial) => {
+      const key = comparisonTrialKey(stimulus.stimulusName, trial);
+      const replacement = key === null ? undefined : recovered.get(key);
+      if (!trial.errored || !replacement) return trial;
+      return {
+        ...replacement.trial,
+        trialIndex: trial.trialIndex,
+        comparisonAttempt: 3,
+        targetedRecovery: true,
+        recoveredFrom: replacement.slot.error,
+      };
+    });
+  }
+
+  const previous = report.retrySummary ?? {};
+  const recoveredKeys = new Set(
+    [...recovered.values()].map((entry) =>
+      comparisonTrialKey(entry.slot.stimulusName, { trialIndex: entry.slot.trialIndex }),
+    ),
+  );
+  report.retrySummary = {
+    ...previous,
+    attempts: 3,
+    recoveredSlots: (previous.recoveredSlots ?? 0) + recovered.size,
+    recoveredErrors: [
+      ...(previous.recoveredErrors ?? []),
+      ...[...recovered.values()].map((entry) => ({
+        stimulusName: entry.slot.stimulusName,
+        trialIndex: entry.slot.trialIndex,
+        attempts: 3,
+        targetedRecovery: true,
+        ...entry.slot.error,
+      })),
+    ],
+    persistentErrors: (previous.persistentErrors ?? []).filter(
+      (entry) =>
+        !recoveredKeys.has(comparisonTrialKey(entry.stimulusName, { trialIndex: entry.trialIndex })),
+    ),
+    targetedRecovery: targeted,
+  };
+  return summarizeComparisonTrials(report, true);
+}
+
+/**
  * Run `vally compare` in two-run mode over one eval's baseline vs skilled
  * slices and return the parsed comparison record (or null on failure).
  */
@@ -873,12 +1472,13 @@ function pct(x) {
   return `${(x * 100).toFixed(1)}%`;
 }
 
-function comparisonToVerdict(report, identity, roles, nonActivationStims) {
+function comparisonToVerdict(report, identity, roles, nonActivationStims, targetKind = "skill") {
   const s = report.summary;
   const unmatchedBaseline = report.unmatchedBaseline ?? [];
   const unmatchedTreatment = report.unmatchedTreatment ?? [];
   const unmatchedTrialCount = unmatchedBaseline.length + unmatchedTreatment.length;
   const identityErrors = comparisonTrialIdentityErrors(report);
+  const nonActivation = nonActivationStims ?? new Set();
 
   // Raw paired trials remain authoritative for report-integrity checks, retry
   // accounting, and within-stimulus reliability. They are not independent task
@@ -914,13 +1514,16 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
 
   // Collapse repeated runs to one vote per stimulus. A stimulus votes in the
   // direction supported by more of its successful runs; an even split or all
-  // ties contributes one stimulus-level tie.
+  // ties contributes one stimulus-level tie. Explicit dormancy scenarios retain
+  // their vote as report-only evidence but do not enter the preference gate:
+  // correct dormancy makes the skilled and baseline arms equivalent by design.
   const stimulusVotes = (report.stimuli ?? []).map((stimulus) => {
     const counted = (stimulus.trials ?? []).filter((trial) => !trial.errored);
     const stimulusWins = counted.filter((trial) => trialDirection(trial) > 0).length;
     const stimulusLosses = counted.filter((trial) => trialDirection(trial) < 0).length;
     return {
       stimulusName: stimulus.stimulusName,
+      preferenceGateEligible: !nonActivation.has(stimulus.stimulusName),
       runCount: counted.length,
       wins: stimulusWins,
       ties: counted.length - stimulusWins - stimulusLosses,
@@ -928,10 +1531,18 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
       direction: stimulusWins > stimulusLosses ? 1 : stimulusLosses > stimulusWins ? -1 : 0,
     };
   });
-  const directions = stimulusVotes.filter((vote) => vote.runCount > 0).map((vote) => vote.direction);
+  const preferenceVotes = stimulusVotes.filter(
+    (vote) => vote.preferenceGateEligible && vote.runCount > 0,
+  );
+  const excludedVotes = stimulusVotes.filter((vote) => !vote.preferenceGateEligible);
+  const scoredExcludedVotes = excludedVotes.filter((vote) => vote.runCount > 0);
+  const directions = preferenceVotes.map((vote) => vote.direction);
   const wins = directions.filter((value) => value > 0).length;
   const losses = directions.filter((value) => value < 0).length;
   const ties = directions.length - wins - losses;
+  const excludedWins = scoredExcludedVotes.filter((vote) => vote.direction > 0).length;
+  const excludedLosses = scoredExcludedVotes.filter((vote) => vote.direction < 0).length;
+  const excludedTies = scoredExcludedVotes.length - excludedWins - excludedLosses;
 
   // Too few distinct stimulus votes for any record to reach significance is an
   // eval-design problem. A stimulus count depressed by comparison errors or
@@ -948,11 +1559,10 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
   const netWin = directions.length ? (wins - losses) / directions.length : 0;
   const credible = pValue <= SIGN_TEST_ALPHA;
   const practicallyMeaningful = Math.abs(netWin) >= MIN_PRACTICAL_NET_WIN;
-  const passed =
+  const preferencePassed =
     conclusive && !underpowered && direction === "better" && credible && practicallyMeaningful;
   const regressed =
     conclusive && !underpowered && direction === "worse" && credible && practicallyMeaningful;
-  const nonActivation = nonActivationStims ?? new Set();
 
   // Compare's per-stimulus preference (meanScore + trials), keyed by name so we
   // can attach it to the dashboard scenario carrying the absolute role data.
@@ -981,9 +1591,9 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
     const skilled = roleFromRecords(skilledByStim.get(name));
     const plugin = hasPlugin ? roleFromRecords(pluginByStim.get(name)) : null;
 
-    // Per-scenario record on the same win/tie/loss basis as the verdict, so a
-    // scenario row can never point the opposite way to the verdict it feeds.
-    // Computed once here rather than re-derived by each renderer.
+    // Per-scenario preference record, computed once rather than re-derived by
+    // each renderer. Dormancy rows retain this evidence even though they do not
+    // feed the preference verdict.
     const counted = (st?.trials ?? []).filter((t) => !t.errored);
     const vote = voteByStim.get(name);
     const sWins = vote?.wins ?? 0;
@@ -1011,26 +1621,45 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
         errored: t.errored ?? false,
       })),
       // Absolute dashboard fields. `expect_activation: false` in the eval spec
-      // marks a scenario where the skill should stay dormant, so a correct
-      // non-activation isn't reported as a missing activation.
+      // marks a scenario where the skill should stay dormant. It remains visible
+      // as comparison and completion evidence, but it does not vote in the
+      // preference gate.
       expectActivation: !nonActivation.has(name),
+      preferenceGateEligible: !nonActivation.has(name),
+      preferenceGateExclusionReason: nonActivation.has(name)
+        ? "activation_contract_only"
+        : null,
       timedOut: Boolean(skilled?.timedOut),
-      skillActivationIsolated: { activated: Boolean(skilled?.activated) },
+      skillActivationIsolated: {
+        activated: Boolean(skilled?.activated),
+        ...(skilled?.postActivation ?? {}),
+      },
       baseline: roleToDashboard(baseline),
       skilledIsolated: roleToDashboard(skilled),
     };
+    if (targetKind === "agent") {
+      scenario.agentActivationIsolated = { activated: Boolean(skilled?.activated) };
+    }
     if (hasPlugin) {
-      scenario.skillActivationPlugin = { activated: Boolean(plugin?.activated) };
+      scenario.skillActivationPlugin = {
+        activated: Boolean(plugin?.activated),
+        ...(plugin?.postActivation ?? {}),
+      };
+      if (targetKind === "agent") {
+        scenario.agentActivationPlugin = { activated: Boolean(plugin?.activated) };
+      }
       scenario.skilledPlugin = roleToDashboard(plugin);
     }
     return scenario;
   });
 
   // This is the authoritative gate evidence. Raw repeated-run outcomes remain
-  // available in scenarios[].trials and comparisonTrialEvidence.
+  // available in scenarios[].trials and comparisonTrialEvidence; explicitly
+  // excluded dormancy outcomes are summarized separately below.
   const scenarioEvidence = {
     gateEligible: true,
-    reason: "Authoritative: repeated runs are collapsed to one directional vote per stimulus",
+    reason:
+      "Authoritative: repeated runs are collapsed to one directional vote per preference-eligible stimulus",
     count: directions.length,
     wins,
     ties,
@@ -1040,6 +1669,19 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
     netWin,
     pValue,
     alpha: SIGN_TEST_ALPHA,
+  };
+  const excludedScenarioEvidence = {
+    gateEligible: false,
+    reason:
+      "Activation-contract-only stimuli are retained but excluded from preference inference",
+    exclusionReason: "activation_contract_only",
+    count: excludedVotes.length,
+    scoredCount: scoredExcludedVotes.length,
+    unscoredCount: excludedVotes.length - scoredExcludedVotes.length,
+    wins: excludedWins,
+    ties: excludedTies,
+    losses: excludedLosses,
+    discordant: excludedWins + excludedLosses,
   };
 
   // Vally compare currently exposes aggregate per-arm pass booleans. They are
@@ -1068,6 +1710,52 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
     }
   }
 
+  // `expect_activation: false` is an explicit contract on the isolated target
+  // skill. Plugin activity cannot prove a violation because the plugin arm does
+  // not identify which sibling skill emitted the activity event.
+  const activationContractScenarios = scenarios
+    .filter((scenario) => scenario.expectActivation === false)
+    .map((scenario) => ({
+      scenarioName: scenario.scenarioName,
+      expected: "dormant",
+      observed: (targetKind === "agent"
+        ? scenario.agentActivationIsolated?.activated
+        : scenario.skillActivationIsolated?.activated)
+        ? "activated"
+        : "dormant",
+      satisfied: !(targetKind === "agent"
+        ? scenario.agentActivationIsolated?.activated
+        : scenario.skillActivationIsolated?.activated),
+    }));
+  const activationContractFailures = activationContractScenarios.filter(
+    (scenario) => !scenario.satisfied,
+  );
+  const observedStimulusNames = new Set(stimulusNames);
+  const unmatchedDormancyStimuli = [...nonActivation]
+    .filter((name) => !observedStimulusNames.has(name))
+    .sort();
+  if (unmatchedDormancyStimuli.length > 0) {
+    warn(
+      `${identity.plugin}/${identity.skill}: ${unmatchedDormancyStimuli.length} dormancy annotation(s) ` +
+        `matched no observed stimulus: ${unmatchedDormancyStimuli.join(", ")}`,
+    );
+  }
+  const activationContract = {
+    evaluated: true,
+    requiredForPass: true,
+    source: `isolated_target_${targetKind}_activation`,
+    reason:
+      "Explicit dormancy expectations are evaluated independently of preference",
+    count: activationContractScenarios.length,
+    satisfied: activationContractScenarios.length - activationContractFailures.length,
+    violated: activationContractFailures.length,
+    passed: activationContractFailures.length === 0,
+    failures: activationContractFailures,
+    scenarios: activationContractScenarios,
+    unmatchedDormancyStimuli,
+  };
+  const passed = preferencePassed && activationContract.passed;
+
   const sweep = directions.length > 0 && wins === directions.length;
   // The sign test conditions on discordant (non-tie) stimulus votes, so this —
   // not the total stimulus-vote count — decides whether any record could have
@@ -1082,10 +1770,13 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
         ? "inconclusive (unmatched trajectories)"
         : !summaryAgrees
           ? `inconclusive (compare report inconsistent: summary says ${s.trialCount} trial(s) ` +
-            `${s.wins}W/${s.ties}T/${s.losses}L, trials show ${directions.length} ` +
-            `${wins}W/${ties}T/${losses}L)`
-          : underpowered
-            ? `underpowered (${directions.length} counted stimulus vote(s); a credible verdict needs at ` +
+            `${s.wins}W/${s.ties}T/${s.losses}L, trials show ${trialDirections.length} ` +
+            `${trialWins}W/${trialTies}T/${trialLosses}L)`
+          : !activationContract.passed
+            ? `activation contract failed (${activationContract.violated} explicit dormancy ` +
+              `scenario(s) activated the isolated target skill)`
+            : underpowered
+            ? `underpowered (${directions.length} preference-eligible stimulus vote(s); a credible verdict needs at ` +
               `least ${MIN_CREDIBLE_STIMULI}${sweep ? ", and this eval won every one of them" : ""}) — ` +
               `add distinct, discriminating stimuli; repeated runs do not increase task breadth`
             : credible && direction !== "none" && !practicallyMeaningful
@@ -1099,20 +1790,23 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
                 : wins <= losses
                   ? "no improvement"
                   : discordant < MIN_CREDIBLE_STIMULI
-                    ? `not credible — ${ties} of ${directions.length} stimulus vote(s) tied, leaving only ` +
-                      `${discordant} discordant stimulus vote(s). The sign test conditions on non-tie ` +
+                    ? `not credible — ${ties} of ${directions.length} preference-eligible stimulus vote(s) tied, leaving only ` +
+                      `${discordant} discordant preference vote(s). The sign test conditions on non-tie ` +
                       `stimulus votes and cannot reach ${SIGN_TEST_ALPHA} below ${MIN_CREDIBLE_STIMULI}, so ` +
                       `no record could have passed here — this is not a measured null. Either the ` +
-                      `skill is inert on these scenarios (make them discriminate) or the eval ` +
+                      `${targetKind} is inert on these scenarios (make them discriminate) or the eval ` +
                       `needs more distinct stimuli to clear the ties`
                     : `not credible (sign test p=${pValue.toFixed(3)} > ${SIGN_TEST_ALPHA})`;
 
   const reason =
     `Net win ${netWin >= 0 ? "+" : ""}${pct(netWin)} ` +
-    `(${wins}W/${ties}T/${losses}L over ${directions.length} stimulus vote(s), ` +
+    `(${wins}W/${ties}T/${losses}L over ${directions.length} preference-eligible stimulus vote(s), ` +
     `sign test p=${pValue.toFixed(3)}), ` +
     `mean preference ${s.meanScore >= 0 ? "+" : ""}${pct(s.meanScore)}` +
     ` across ${trialDirections.length} paired run(s)` +
+    `${excludedScenarioEvidence.count
+      ? `, ${excludedScenarioEvidence.count} dormancy stimulus/stimuli excluded from preference`
+      : ""}` +
     `${s.erroredCount ? `, ${s.erroredCount} errored` : ""}` +
     `${unmatchedTrialCount ? `, ${unmatchedTrialCount} unmatched` : ""} — ${credibility}`;
 
@@ -1155,6 +1849,9 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
           : unmatchedTrialCount > 0
             ? { code: "unmatched_trajectories", phase: "comparison_pairing" }
             : { code: "comparison_summary_mismatch", phase: "adapter" };
+  } else if (!activationContract.passed) {
+    state = VERDICT_STATES.VALID_NO_CHANGE;
+    stateReason = { code: "activation_contract_failed", phase: "activation" };
   } else if (underpowered) {
     state = VERDICT_STATES.INVALID_INCONCLUSIVE;
     stateReason = { code: "underpowered", phase: "eval_design" };
@@ -1178,6 +1875,7 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
   return {
     skillName: identity.skill,
     skillPath: identity.skillPath,
+    skillKind: targetKind,
     state,
     stateReason,
     conclusive,
@@ -1221,7 +1919,8 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
     trialCount: directions.length,
     comparisonTrialEvidence: {
       gateEligible: false,
-      reason: "Reliability only: repeated runs are not independent task samples",
+      reason:
+        "Reliability only: all repeated runs, including preference-excluded dormancy runs, are retained",
       count: trialDirections.length,
       wins: trialWins,
       ties: trialTies,
@@ -1235,6 +1934,8 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
     mcnemar: s.mcnemar,
     metricDeltas: s.metricDeltas,
     scenarioEvidence,
+    excludedScenarioEvidence,
+    activationContract,
     completionTransitions,
     comparisonAttempts: report.retrySummary ?? {
       attempts: 1,
@@ -1253,10 +1954,12 @@ function comparisonToVerdict(report, identity, roles, nonActivationStims) {
 
 function verdictSummaryLine(v) {
   const icon =
-    v.state === VERDICT_STATES.INVALID_INCONCLUSIVE || !v.conclusive || v.underpowered
+    v.state === VERDICT_STATES.INVALID_INCONCLUSIVE || !v.conclusive
       ? "⚠️"
       : v.state === VERDICT_STATES.VALID_REGRESSION
         ? "🔻"
+        : v.stateReason?.code === "activation_contract_failed"
+          ? "⛔"
         : v.passed
           ? "✅"
           : v.preferenceRegressed
@@ -1274,7 +1977,7 @@ function verdictSummaryLine(v) {
   return `${icon} ${v.skillName}: ${v.reason}${scenarios ? "\n" + scenarios : ""}`;
 }
 
-function invalidVerdict(identity, cause, message, accounting = {}) {
+function invalidVerdict(identity, cause, message, accounting = {}, targetKind = "skill") {
   const error = {
     phase: cause.phase,
     kind: cause.kind ?? "permanent",
@@ -1284,6 +1987,7 @@ function invalidVerdict(identity, cause, message, accounting = {}) {
   return {
     skillName: identity.skill,
     skillPath: identity.skillPath,
+    skillKind: targetKind,
     state: VERDICT_STATES.INVALID_INCONCLUSIVE,
     stateReason: { code: cause.code, phase: cause.phase },
     conclusive: false,
@@ -1315,6 +2019,31 @@ function invalidVerdict(identity, cause, message, accounting = {}) {
       netWin: 0,
       pValue: 1,
       alpha: SIGN_TEST_ALPHA,
+    },
+    excludedScenarioEvidence: {
+      gateEligible: false,
+      reason: "No complete comparison was available",
+      exclusionReason: "activation_contract_only",
+      count: 0,
+      scoredCount: 0,
+      unscoredCount: 0,
+      wins: 0,
+      ties: 0,
+      losses: 0,
+      discordant: 0,
+    },
+    activationContract: {
+      evaluated: false,
+      requiredForPass: true,
+      source: "isolated_target_skill_activation",
+      reason: "No activation contract could be evaluated",
+      count: 0,
+      satisfied: 0,
+      violated: 0,
+      passed: null,
+      failures: [],
+      scenarios: [],
+      unmatchedDormancyStimuli: [],
     },
     completionTransitions: {
       gateEligible: false,
@@ -1366,7 +2095,7 @@ function invalidVerdict(identity, cause, message, accounting = {}) {
 
 function writeVerdictResults(outputRoot, evalFile, identity, verdict, expectedEval) {
   const results = {
-    schemaVersion: 3,
+    schemaVersion: 5,
     evalFile,
     model: opts.model,
     judgeModel: opts["judge-model"],
@@ -1497,6 +2226,31 @@ function main() {
         continue;
       }
 
+      let nonActivationStimuli;
+      try {
+        nonActivationStimuli = readNonActivationStimuli(evalFile, opts["repo-root"]);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const message = `${plugin}/${skill}: ${detail}`;
+        warn(message);
+        const verdict = invalidVerdict(
+          identity,
+          { code: "eval_spec_unreadable", phase: "adapter", kind: "permanent" },
+          message,
+          {
+            baselineRecords: baseline.length,
+            skilledRecords: skilled.length,
+            pluginRecords: pluginRecs.length,
+          },
+        );
+        const outputPath = writeVerdictResults(outputRoot, evalFile, identity, verdict, expectedEval);
+        console.log(`\n${verdictSummaryLine(verdict)}\n  → ${outputPath}`);
+        recordInvalidEval(evalFile, verdict);
+        written++;
+        incomplete++;
+        continue;
+      }
+
       const baselineSlice = join(workDir, `${plugin}__${skill}__baseline.jsonl`);
       const skilledSlice = join(workDir, `${plugin}__${skill}__skilled.jsonl`);
       const compareOut = join(workDir, `${plugin}__${skill}__compare.jsonl`);
@@ -1506,6 +2260,20 @@ function main() {
       let report;
       try {
         report = runCompareWithRetry(baselineSlice, skilledSlice, compareOut);
+        if (report) {
+          // A slice-level retry re-judges every trial, so a single unlucky judge
+          // session can stall twice and strand an otherwise-complete measurement.
+          // Re-judge only the still-errored transient slots, one slot at a time,
+          // from the executor trajectories already preserved in the slices above.
+          report = recoverTransientComparisonSlots(report, {
+            baselineRecords: baseline,
+            skilledRecords: skilled,
+            baselineVariant: opts["baseline-variant"],
+            skilledVariant: opts["skilled-variant"],
+            workDir,
+            filePrefix: `${plugin}__${skill}`,
+          });
+        }
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         const message = `${plugin}/${skill}: vally compare failed (${detail})`;
@@ -1561,7 +2329,7 @@ function main() {
           report,
           identity,
           roles,
-          readNonActivationStimuli(evalFile, opts["repo-root"]),
+          nonActivationStimuli,
         );
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -1658,6 +2426,8 @@ if (isMain) {
 export {
   roleFromRecords,
   roleToDashboard,
+  continuedAfterSkillActivation,
+  postActivationFromRecords,
   groupByStimulus,
   stimulusOf,
   comparisonToVerdict,
@@ -1668,7 +2438,11 @@ export {
   trialDirection,
   classifyComparisonError,
   mergeComparisonReports,
+  recoverTransientComparisonSlots,
+  transientComparisonSlots,
+  MAX_TARGETED_COMPARISON_SLOTS,
   loadExpectedEvalFiles,
+  normalizeEvalFile,
   VERDICT_STATES,
   MIN_CREDIBLE_STIMULI,
   MIN_PRACTICAL_NET_WIN,

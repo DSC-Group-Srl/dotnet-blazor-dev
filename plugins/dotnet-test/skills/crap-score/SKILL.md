@@ -28,8 +28,8 @@ Where:
 | CRAP Score | Risk Level | Interpretation |
 |------------|------------|----------------|
 | < 5        | Low        | Simple and well-tested |
-| 5-15       | Moderate   | Acceptable for most code |
-| 15-30      | High       | Needs more tests or simplification |
+| 5 to < 15  | Moderate   | Acceptable for most code |
+| 15 to 30   | High       | Needs more tests or simplification |
 | > 30       | Critical   | Refactor and add coverage urgently |
 
 A method with 100% coverage has CRAP = complexity (the minimum). A method with 0% coverage has CRAP = complexity^2 + complexity.
@@ -60,50 +60,77 @@ A method with 100% coverage has CRAP = complexity (the minimum). A method with 0
 
 ### Step 1: Collect code coverage data
 
-If no coverage data exists yet, classify the test project first. For SDK-style
-projects, run `dotnet test` with coverage collection. For classic non-SDK
-projects (`ToolsVersion`, explicit compile items, or `packages.config`), use only
-a repository-provided coverage command that emits Cobertura. If none exists,
-ask for Cobertura XML and stop; do not migrate the project or inject an SDK-style
-coverage package. CRAP scores always require real coverage data.
+If the user supplies a valid Cobertura report that contains the requested
+target, use it directly and do not rerun tests. If the supplied report is
+malformed, empty, internally contradictory, or missing the target, treat it as
+failed input: regenerate it with a repository-compatible command when possible,
+or request a valid report when collection is unavailable. Otherwise invoke
+`run-tests` to classify the repository's test platform and confirm the
+compatible command shape, then require a command that emits Cobertura:
 
-Check the test project's `.csproj` for the coverage package, then run the appropriate command:
+| Coverage provider | Cobertura command |
+|---|---|
+| `coverlet.collector` with VSTest | `dotnet test <test.csproj> --collect:"XPlat Code Coverage" --results-directory <results-dir>` |
+| `Microsoft.Testing.Extensions.CodeCoverage` with .NET 9 bridged MTP | `dotnet test <test.csproj> -- --coverage --coverage-output-format cobertura --coverage-output <output-path>` |
+| `Microsoft.Testing.Extensions.CodeCoverage` with .NET 10+ native MTP | `dotnet test --project <test.csproj> --coverage --coverage-output-format cobertura --coverage-output <output-path>` |
 
-| Coverage Package | Command | Output Location |
-|---|---|---|
-| `coverlet.collector` | `dotnet test --collect:"XPlat Code Coverage" --results-directory ./TestResults` | Typically under `TestResults/<guid>/coverage.cobertura.xml`. Search recursively under the results directory (for example, `TestResults/**/coverage.cobertura.xml`) or use any explicit coverage path the user provides. |
-| `Microsoft.Testing.Extensions.CodeCoverage` (.NET 9) | `dotnet test -- --coverage --coverage-output-format cobertura --coverage-output ./TestResults` | `--coverage-output` path |
-| `Microsoft.Testing.Extensions.CodeCoverage` (.NET 10+) | `dotnet test --coverage --coverage-output-format cobertura --coverage-output ./TestResults` | `--coverage-output` path |
+Use an equivalent repository-owned command when the project defines one. Search
+the results directory recursively when the collector creates a GUID subfolder.
+Do not substitute a generic binary `.coverage` command when no converter is
+available.
+
+Do not stop at the first restore, compilation, test, or collector failure.
+Classify the failing layer, inspect every report the command emitted, and
+exhaust non-persistent retries before asking for input. Safe retries include
+command-line MSBuild properties that leave source and manifests unchanged and
+an already-installed or repository-provided alternative collector. A trivial
+source error is a collection blocker, not the final analysis, when a reversible
+command-line setting can compile the same source. Never call an empty Cobertura
+file a successful fallback.
+
+For classic non-SDK projects (`ToolsVersion`, explicit compile items, or
+`packages.config`), use only a repository-provided coverage command that emits
+Cobertura. If none exists, request Cobertura XML and stop; do not migrate the
+project or inject an SDK-style provider. CRAP scores always require real
+coverage data.
 
 #### Never estimate coverage
 
 **Guessed coverage produces wrong CRAP scores, which is worse than no answer.**
 For a classic project with no repository coverage command or existing report,
-stop here and request Cobertura; do not use any collection fallback below.
+stop here and request Cobertura.
 
-For SDK-style projects, if the first command yields no Cobertura XML, work down
-this collection list before giving up:
+Do not add coverage packages, change project manifests, or install global tools
+unless the user explicitly authorized dependency/tooling changes. If the
+repository lacks a usable provider or converter, report that exact prerequisite
+and the compatible command shape identified through `run-tests`, then stop. If
+an existing binary `.coverage` report is present, convert it only with an
+already-installed or repository-provided converter; otherwise request
+authorization or a Cobertura export. If tests execute with failures but still
+emit valid coverage, continue with that data and note the failures. Report
+complexity on its own if useful, but never publish a CRAP number derived from
+assumed coverage.
 
-1. For SDK-style projects only, add a provider if none is referenced:
-   `dotnet add <test.csproj> package coverlet.collector`, then re-run. Never use
-   this fallback for `packages.config` or classic non-SDK projects.
-2. Use the standalone collector, which works even when the test host or a shared assembly blocks the in-proc collector:
-   `dotnet tool install --global dotnet-coverage` then
-   `dotnet-coverage collect -f cobertura -o coverage.cobertura.xml "dotnet test <test.csproj>"`.
+Before using a report, verify that it parses, contains at least one class and
+method, and contains the requested target. An empty report or a report that
+omits the target is failed collection or filtering, not 0% coverage. Regenerate
+coverage when possible; otherwise stop without publishing a CRAP score.
 
-For any project type, if a real binary `.coverage` report already exists, convert
-or summarize that existing data with ReportGenerator:
-
-3. Convert the existing report:
-   `dotnet tool install --global dotnet-reportgenerator-globaltool` then
-   `reportgenerator -reports:<file> -targetdir:cov -reporttypes:Cobertura`.
-4. Tests fail but still run? Coverage is collected from the tests that executed — continue with that data and note the failures.
-
-If every path fails, **report that coverage could not be collected, show the commands you tried and their errors, and stop.** Report complexity on its own if useful, but never publish a CRAP number derived from an assumed coverage percentage.
+If the user supplies an existing report, state that it was not regenerated.
+Do not describe its data as current unless its provenance is established by
+running the repository's coverage command in this analysis.
 
 ### Step 2: Compute cyclomatic complexity
 
-Analyze the target source files to determine cyclomatic complexity per method. Count the following decision points (each adds 1 to the base complexity of 1):
+Prefer a machine-produced per-method complexity from a repository-provided code
+metrics report or from the Cobertura method's `complexity` attribute when that
+report maps to the current source. Microsoft.CodeAnalysis.Metrics can generate
+method-level `CyclomaticComplexity` data through `msbuild /t:Metrics`, but do
+not add the package or modify the project without user approval.
+
+If no machine-produced metric exists, analyze the current target source and
+label the result as a manual complexity count. Count the following decision
+points (each adds 1 to the base complexity of 1):
 
 | Construct | Example |
 |-----------|---------|
@@ -124,7 +151,15 @@ Analyze the target source files to determine cyclomatic complexity per method. C
 
 Base complexity is 1 for every method. Each decision point adds 1.
 
-When analyzing, read the source file and count these constructs per method. Report the breakdown.
+When counting manually, read the source file, report the construct-by-construct
+breakdown, and do not use a source comment as evidence. Count every occurrence,
+including operators nested inside arguments or return expressions; before
+declaring a conflict, rescan specifically for `&&`, `||`, `??`, `?.`, ternaries,
+and switch/pattern arms. If a supplied report maps to the current method and a
+careful recount agrees, use its metric decisively. If a genuine disagreement
+remains, label both sources; when the user explicitly asked to use that report,
+calculate the primary CRAP result from its machine-produced metric and present
+the manual count as a caveat rather than withholding the requested result.
 
 ### Step 3: Extract per-method coverage from Cobertura XML
 
@@ -134,11 +169,24 @@ $$\text{cov}(m) = \frac{\text{lines with hits} > 0}{\text{total lines}}$$
 
 Method names in Cobertura may differ from source (async methods, lambdas). Match by line ranges when names don't align.
 
+When both `line-rate` and `<lines>` exist, recompute the hit ratio and compare
+them. Allow only normal report rounding (one percentage point); if they differ
+more, the report contradicts itself. Regenerate it or report the conflict and
+stop without calculating CRAP. Never silently choose whichever value produces
+the expected score.
+
 ### Step 4: Calculate CRAP scores
 
 For each method in scope, apply the formula:
 
 $$\text{CRAP}(m) = \text{comp}(m)^2 \times (1 - \text{cov}(m))^3 + \text{comp}(m)$$
+
+Use a calculator or script for the arithmetic and show the substituted
+complexity and coverage. Do not calculate the formula mentally. Answer a named
+method directly; analyze unrelated methods only when the requested scope is a
+class or file. Once the requested result is established, do not append
+hypothetical refactor scores or coverage targets unless the user asked for
+them. Any numeric example must also come from the calculator or script.
 
 ### Step 5: Present results
 
@@ -147,7 +195,7 @@ Present a sorted table (highest CRAP first):
 ```text
 | Method                          | Complexity | Coverage | CRAP Score | Risk     |
 |---------------------------------|------------|----------|------------|----------|
-| OrderService.ProcessOrder       | 12         | 45%      | 28.4       | High     |
+| OrderService.ProcessOrder       | 10         | 45%      | 26.6       | High     |
 | OrderService.ValidateItems      | 8          | 90%      | 8.1        | Moderate |
 | OrderService.CalculateTotal     | 3          | 100%     | 3.0        | Low      |
 ```
@@ -171,21 +219,26 @@ $$\text{cov}_{\text{needed}} = 1 - \left(\frac{15 - \text{comp}}{\text{comp}^2}\
 
 This formula only applies when comp < 15. When comp >= 15, the minimum possible CRAP score (at 100% coverage) is comp itself, which already meets or exceeds the threshold. In that case, **coverage alone cannot bring the CRAP score below the threshold** -- the method must be refactored to reduce its cyclomatic complexity first.
 
-Report this as: "To bring `ProcessOrder` (complexity 12) below CRAP 15, increase coverage from 45% to at least 72%." For methods where complexity alone exceeds the threshold, report: "`ComplexMethod` (complexity 18) cannot reach CRAP < 15 through testing alone -- reduce complexity by extracting sub-methods."
+Report this as: "To bring `ProcessOrder` (complexity 10) below CRAP 15, increase coverage from 45% to more than 63.2% (at least 64% when reporting whole percentages)." For methods where complexity alone exceeds the threshold, report: "`ComplexMethod` (complexity 18) cannot reach CRAP < 15 through testing alone -- reduce complexity by extracting sub-methods."
 
 ## Validation
 
 - Verify that coverage data was collected successfully (Cobertura XML exists and contains data)
+- Confirm the target method is present; absence is not evidence of 0% coverage
 - Confirm every coverage figure came from that XML — no estimated, assumed, or source-comment-derived values
+- Cross-check method `line-rate` against its line-hit ratio when both exist
 - Cross-check that method names in coverage data match the source code
-- Confirm CRAP scores by spot-checking the formula on one method manually
+- Confirm CRAP scores with calculator or script output
 - Ensure a 100%-covered method's CRAP equals its complexity exactly
 
 ## Common Pitfalls
 
-- **Estimating coverage when collection fails**: never do it — the resulting CRAP scores are wrong in the direction that matters. Work through the fallbacks in Step 1, then report the blocker instead.
+- **Estimating coverage when collection fails**: never do it — the resulting CRAP scores are wrong in the direction that matters. Use the repository-compatible Cobertura path confirmed through `run-tests`, then report the blocker instead.
+- **Treating an empty report or missing method as 0% coverage**: this is failed collection, filtering, or method mapping; do not manufacture a score.
+- **Trusting contradictory Cobertura fields**: compare `line-rate` with the line-hit ratio and stop if they disagree beyond rounding.
 - **Trusting a stale complexity comment in the source**: compute cyclomatic complexity from the current code; a `// complexity: 7` comment left by a previous author is not evidence.
-- **Giving up on a shared-assembly or test-host collector error**: `dotnet-coverage collect` runs out of process and usually succeeds where the in-proc collector fails.
-- **Stale coverage data**: Always regenerate coverage before computing CRAP scores. Old coverage files will produce misleading results.
+- **Mental CRAP arithmetic**: use a calculator or script and show the substituted inputs.
+- **Changing tooling to bypass a collector error**: report the failed repository-compatible command and missing prerequisite; do not install a global collector or edit manifests without explicit authorization.
+- **Stale coverage data**: regenerate when the user asks for current results or the source/binaries changed; otherwise disclose that a supplied report was not regenerated.
 - **Method name mismatches**: Cobertura XML may use mangled/compiler-generated names for async methods, lambdas, or local functions. Match by line ranges when names don't align.
 - **Generated code**: Exclude auto-generated files (e.g., `*.Designer.cs`, `*.g.cs`) from analysis unless explicitly requested.
