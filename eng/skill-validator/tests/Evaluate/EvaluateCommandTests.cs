@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using SkillValidator.Evaluate;
 using SkillValidator.Shared;
 
@@ -398,21 +399,55 @@ public class EvaluateCommandTests
     }
 
     [TestMethod]
-    public void RunMetricErrorsFailSessionsAndScenarioExecution()
+    public void TerminalRunMetricErrorsFailSessionsAndScenarioExecution()
     {
         var clean = new RunMetrics();
-        var failed = new RunMetrics { ErrorCount = 1 };
+        var recoverable = new RunMetrics { ErrorCount = 1 };
+        var failed = new RunMetrics { ErrorCount = 1, TerminalErrorCount = 1 };
         var timedOut = new RunMetrics { ErrorCount = 1, TimedOut = true };
 
         Assert.AreEqual("completed", EvaluateCommand.GetSessionStatus(clean));
         Assert.AreEqual("reused", EvaluateCommand.GetSessionStatus(clean, reused: true));
+        Assert.AreEqual("completed", EvaluateCommand.GetSessionStatus(recoverable));
         Assert.AreEqual("failed", EvaluateCommand.GetSessionStatus(failed));
         Assert.AreEqual("failed", EvaluateCommand.GetSessionStatus(failed, reused: true));
         Assert.AreEqual("timed_out", EvaluateCommand.GetSessionStatus(timedOut));
+        EvaluateCommand.ThrowIfRunExecutionFailed(clean, recoverable, clean);
         var error = Assert.ThrowsExactly<InvalidOperationException>(() =>
             EvaluateCommand.ThrowIfRunExecutionFailed(clean, failed, clean));
         Assert.Contains("isolated", error.Message);
         EvaluateCommand.ThrowIfRunExecutionFailed(clean, timedOut, clean);
+    }
+
+    [TestMethod]
+    public void FailedToolCallFollowedByRecoveryRemainsEligible()
+    {
+        var metrics = MetricsCollector.CollectMetrics(
+            [
+                new AgentEvent(
+                    "tool.execution_complete",
+                    1,
+                    new Dictionary<string, JsonNode?>
+                    {
+                        ["success"] = JsonValue.Create(false),
+                    }),
+                new AgentEvent(
+                    "tool.execution_complete",
+                    2,
+                    new Dictionary<string, JsonNode?>
+                    {
+                        ["success"] = JsonValue.Create(true),
+                    }),
+                new AgentEvent("session.idle", 3, []),
+            ],
+            "recovered",
+            1000,
+            "/tmp/work");
+
+        Assert.AreEqual(1, metrics.ErrorCount);
+        Assert.AreEqual(0, metrics.TerminalErrorCount);
+        Assert.AreEqual("completed", EvaluateCommand.GetSessionStatus(metrics));
+        EvaluateCommand.ThrowIfRunExecutionFailed(metrics, metrics, metrics);
     }
 
     [TestMethod]

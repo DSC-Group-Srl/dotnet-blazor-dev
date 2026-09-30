@@ -110,6 +110,7 @@ public static class MetricsCollector
         var toolCallBreakdown = new Dictionary<string, int>();
         int turnCount = 0;
         int errorCount = 0;
+        int terminalErrorCount = 0;
 
         foreach (var evt in events)
         {
@@ -150,9 +151,15 @@ public static class MetricsCollector
                     break;
                 }
 
-                case "runner.timeout":
                 case "session.error":
                 case "runner.error":
+                {
+                    errorCount++;
+                    terminalErrorCount++;
+                    break;
+                }
+
+                case "runner.timeout":
                 {
                     errorCount++;
                     break;
@@ -192,6 +199,7 @@ public static class MetricsCollector
             TurnCount = turnCount,
             WallTimeMs = wallTimeMs,
             ErrorCount = errorCount,
+            TerminalErrorCount = terminalErrorCount,
             TimedOut = events.Any(e => e.Type == "runner.timeout"),
             AgentOutput = agentOutput,
             Events = events,

@@ -137,7 +137,7 @@ public static class EvaluateCommand
     {
         if (metrics.TimedOut)
             return "timed_out";
-        if (metrics.ErrorCount > 0)
+        if (metrics.TerminalErrorCount > 0)
             return "failed";
         if (reused)
             return "reused";
@@ -150,12 +150,12 @@ public static class EvaluateCommand
         RunMetrics plugin)
     {
         var failedRoles = new List<string>();
-        if (baseline.ErrorCount > 0 && !baseline.TimedOut)
-            failedRoles.Add($"baseline ({baseline.ErrorCount} error(s))");
-        if (isolated.ErrorCount > 0 && !isolated.TimedOut)
-            failedRoles.Add($"isolated ({isolated.ErrorCount} error(s))");
-        if (plugin.ErrorCount > 0 && !plugin.TimedOut)
-            failedRoles.Add($"plugin ({plugin.ErrorCount} error(s))");
+        if (baseline.TerminalErrorCount > 0 && !baseline.TimedOut)
+            failedRoles.Add($"baseline ({baseline.TerminalErrorCount} terminal error(s))");
+        if (isolated.TerminalErrorCount > 0 && !isolated.TimedOut)
+            failedRoles.Add($"isolated ({isolated.TerminalErrorCount} terminal error(s))");
+        if (plugin.TerminalErrorCount > 0 && !plugin.TimedOut)
+            failedRoles.Add($"plugin ({plugin.TerminalErrorCount} terminal error(s))");
         if (failedRoles.Count > 0)
         {
             throw new InvalidOperationException(

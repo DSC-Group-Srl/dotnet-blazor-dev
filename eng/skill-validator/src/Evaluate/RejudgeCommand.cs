@@ -540,9 +540,11 @@ public static class RejudgeCommand
         IReadOnlyList<SessionRecord> baselineSessions,
         IReadOnlyList<SessionRecord> treatmentSessions)
     {
+        var knownRoles = BaselineRoles.Concat(IsolatedRoles).Concat(PluginRoles).ToHashSet();
         var unexpectedBaseline = baselineSessions
-            .Where(session => !BaselineRoles.Contains(session.Role)
-                || string.IsNullOrEmpty(session.BaselineKey))
+            .Where(session => !knownRoles.Contains(session.Role)
+                || (BaselineRoles.Contains(session.Role)
+                    && string.IsNullOrEmpty(session.BaselineKey)))
             .Select(FormatSessionIdentity)
             .ToList();
         var baselineRuns = baselineSessions
@@ -559,22 +561,18 @@ public static class RejudgeCommand
         var unmatchedTreatment = new List<string>();
         var duplicateBaseline = new List<string>();
         var duplicateTreatment = new List<string>();
-        var unexpectedTreatment = new List<string>();
+        var unexpectedTreatment = treatmentSessions
+            .Where(session => !knownRoles.Contains(session.Role))
+            .Select(FormatSessionIdentity)
+            .ToList();
+        var treatmentRuns = treatmentSessions
+            .Where(session => IsolatedRoles.Contains(session.Role)
+                || PluginRoles.Contains(session.Role))
+            .ToList();
 
-        foreach (var group in treatmentSessions.GroupBy(s => (s.SkillName, s.ScenarioName, s.RunIndex)))
+        foreach (var group in treatmentRuns.GroupBy(s => (s.SkillName, s.ScenarioName, s.RunIndex)))
         {
             var groupSessions = group.ToList();
-            var unexpectedSessions = groupSessions
-                .Where(session => !IsolatedRoles.Contains(session.Role)
-                    && !PluginRoles.Contains(session.Role))
-                .ToList();
-            if (unexpectedSessions.Count > 0)
-            {
-                unexpectedTreatment.Add(
-                    $"{group.Key.SkillName}/{group.Key.ScenarioName}#{group.Key.RunIndex + 1}: " +
-                    string.Join(", ", unexpectedSessions.Select(FormatSessionIdentity)));
-                continue;
-            }
             var isolatedSessions = groupSessions
                 .Where(session => IsolatedRoles.Contains(session.Role))
                 .ToList();

@@ -390,7 +390,7 @@ public class RejudgeCommandTests
         var baseline = new[]
         {
             Rec("valid", "baseline", 0, "K1"),
-            Rec("unexpected-role", "with-skill-isolated", 0, "K1"),
+            Rec("unexpected-role", "unexpected", 0, "K1"),
             Rec("missing-key", "baseline", 1, null),
         };
         var treatment = new[] { Rec("iso", "with-skill-isolated", 0, "K1") };
@@ -413,14 +413,41 @@ public class RejudgeCommandTests
         var treatment = new[]
         {
             Rec("iso", "with-skill-isolated", 0, "K1"),
-            Rec("extra", "baseline", 0, "K1"),
+            Rec("extra", "unexpected", 0, "K1"),
         };
 
         var pairing = RejudgeCommand.PairCrossDir(baseline, treatment);
 
-        Assert.IsEmpty(pairing.Pairs);
+        Assert.ContainsSingle(pairing.Pairs);
         Assert.Contains("extra", Assert.ContainsSingle(pairing.UnexpectedTreatment));
         Assert.Contains("Unexpected treatment role record(s)", RejudgeCommand.GetCrossDirPairingFailure(pairing)!);
+    }
+
+    [TestMethod]
+    public void PairCrossDir_SelectsArmsFromCompleteThreeArmRecordings()
+    {
+        var baselineDatabase = new[]
+        {
+            Rec("baseline-control", "baseline", 0, "K1"),
+            Rec("baseline-isolated", "with-skill-isolated", 0, "K1"),
+            Rec("baseline-plugin", "with-skill-plugin", 0, "K1"),
+        };
+        var treatmentDatabase = new[]
+        {
+            Rec("treatment-control", "baseline", 0, "K1"),
+            Rec("treatment-isolated", "with-skill-isolated", 0, "K1"),
+            Rec("treatment-plugin", "with-skill-plugin", 0, "K1"),
+        };
+
+        var pairing = RejudgeCommand.PairCrossDir(baselineDatabase, treatmentDatabase);
+
+        var pair = Assert.ContainsSingle(pairing.Pairs);
+        Assert.AreEqual("baseline-control", pair.Baseline.Id);
+        Assert.AreEqual("treatment-isolated", pair.Isolated.Id);
+        Assert.AreEqual("treatment-plugin", pair.Plugin!.Id);
+        Assert.IsEmpty(pairing.UnexpectedBaseline);
+        Assert.IsEmpty(pairing.UnexpectedTreatment);
+        Assert.IsNull(RejudgeCommand.GetCrossDirPairingFailure(pairing));
     }
 
     [TestMethod]

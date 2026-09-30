@@ -425,6 +425,7 @@ public class CollectMetricsTests
         var result = MetricsCollector.CollectMetrics(events, "", 1000, "/tmp/work");
 
         Assert.AreEqual(2, result.ErrorCount);
+        Assert.AreEqual(2, result.TerminalErrorCount);
     }
 
     [TestMethod]
@@ -447,6 +448,7 @@ public class CollectMetricsTests
         var result = MetricsCollector.CollectMetrics(events, "partial output", 1000, "/tmp/work");
 
         Assert.AreEqual(1, result.ErrorCount);
+        Assert.AreEqual(0, result.TerminalErrorCount);
     }
 
     [TestMethod]
@@ -501,6 +503,7 @@ public class CollectMetricsTests
 
         Assert.IsTrue(result.TimedOut);
         Assert.AreEqual(1, result.ErrorCount);
+        Assert.AreEqual(0, result.TerminalErrorCount);
     }
 
     [TestMethod]
@@ -530,6 +533,7 @@ public class CollectMetricsTests
 
         Assert.IsFalse(result.TimedOut);
         Assert.AreEqual(1, result.ErrorCount);
+        Assert.AreEqual(1, result.TerminalErrorCount);
     }
 
     [TestMethod]
@@ -545,6 +549,7 @@ public class CollectMetricsTests
 
         Assert.IsTrue(result.TimedOut);
         Assert.AreEqual(2, result.ErrorCount);
+        Assert.AreEqual(1, result.TerminalErrorCount);
     }
 }
 
