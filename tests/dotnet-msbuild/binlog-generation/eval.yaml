@@ -21,6 +21,33 @@ stimuli:
     golden_trajectory:
       path: ./references/bl-placeholder-flag.json
     graders:
+      - type: run-command
+        config:
+          command: node
+          args:
+            - -e
+            - |
+              const fs = require('fs');
+              const zlib = require('zlib');
+              const files = fs.readdirSync('.', { withFileTypes: true })
+                .filter(entry => entry.isFile() && entry.name.endsWith('.binlog'))
+                .map(entry => entry.name);
+              if (files.length !== 1) {
+                throw new Error('Expected exactly one top-level binlog, found: ' + files.join(', '));
+              }
+              const compressed = fs.readFileSync(files[0]);
+              if (compressed.length < 1024 || compressed[0] !== 0x1f || compressed[1] !== 0x8b) {
+                throw new Error('Not a nontrivial gzip-compressed binlog: ' + files[0]);
+              }
+              const payload = zlib.gunzipSync(compressed);
+              if (payload.length < 4096 || !payload.includes(Buffer.from('BinLog'))) {
+                throw new Error('Missing MSBuild BinLog payload: ' + files[0]);
+              }
+              const output = 'bin/Debug/net8.0/SimpleApp.dll';
+              if (!fs.existsSync(output) || fs.statSync(output).size === 0) {
+                throw new Error('Debug build output is missing: ' + output);
+              }
+          expected_exit_code: 0
       - type: file-exists
         config:
           path: "*.binlog"
@@ -49,6 +76,33 @@ stimuli:
     golden_trajectory:
       path: ./references/powershell-escaping.json
     graders:
+      - type: run-command
+        config:
+          command: node
+          args:
+            - -e
+            - |
+              const fs = require('fs');
+              const zlib = require('zlib');
+              const files = fs.readdirSync('.', { withFileTypes: true })
+                .filter(entry => entry.isFile() && entry.name.endsWith('.binlog'))
+                .map(entry => entry.name);
+              if (files.length !== 1) {
+                throw new Error('Expected exactly one top-level binlog, found: ' + files.join(', '));
+              }
+              const compressed = fs.readFileSync(files[0]);
+              if (compressed.length < 1024 || compressed[0] !== 0x1f || compressed[1] !== 0x8b) {
+                throw new Error('Not a nontrivial gzip-compressed binlog: ' + files[0]);
+              }
+              const payload = zlib.gunzipSync(compressed);
+              if (payload.length < 4096 || !payload.includes(Buffer.from('BinLog'))) {
+                throw new Error('Missing MSBuild BinLog payload: ' + files[0]);
+              }
+              const output = 'bin/Debug/net8.0/SimpleApp.dll';
+              if (!fs.existsSync(output) || fs.statSync(output).size === 0) {
+                throw new Error('Debug build output is missing: ' + output);
+              }
+          expected_exit_code: 0
       - type: file-exists
         config:
           path: "*.binlog"

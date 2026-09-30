@@ -90,6 +90,40 @@ def case(label, mutate, expect_fail, gate_args=(), stage=True):
         shutil.rmtree(d, ignore_errors=True)
 
 
+def base_only_changes_are_ignored_case():
+    d = scratch()
+    try:
+        baseline = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=d, capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(["git", "branch", "feature", baseline], cwd=d, check=True)
+
+        # Advance the comparison branch with an invalid eval change that does
+        # not exist on the feature branch.
+        path = EV(d)
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(raw.replace("defaults:\n", "config:\n", 1))
+        subprocess.run(["git", "add", "-A"], cwd=d, check=True)
+        subprocess.run(["git", "commit", "-qm", "base-only change"], cwd=d, check=True)
+        base_tip = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=d, capture_output=True, text=True, check=True).stdout.strip()
+
+        subprocess.run(["git", "checkout", "-q", "feature"], cwd=d, check=True)
+        code, out = run_gate(d, "--base-ref", base_tip)
+        ok = code == 0 and "enforced 0 changed eval suite(s)" in out
+        print(
+            f"  [{'OK ' if ok else 'BAD'}] {'base-only changes are outside PR scope':<52} "
+            "expected=PASS")
+        if not ok:
+            print("        " + out.strip().replace("\n", "\n        ")[:900])
+        return ok
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def output_case(label, mutate, expect_substring, gate_args=()):
     """Assert on what the gate *reports*, for checks that warn rather than fail.
 
@@ -1628,6 +1662,7 @@ def unresolvable_base_ref(d):
 print("Eval quality gate — self-test\n")
 results = [
     case("clean tree", clean, expect_fail=False),
+    base_only_changes_are_ignored_case(),
     case("stimulus requires prompt or turns", missing_prompt_and_turns,
          expect_fail=True),
     case("fixture referenced but missing on disk", missing_fixture, expect_fail=True),

@@ -258,8 +258,11 @@ def default_base_ref() -> str | None:
 def changed_paths_since(base_ref: str) -> set[str] | None:
     """Return paths changed from base through the index and working tree."""
     try:
-        diff = subprocess.run(
-            ["git", "diff", "--name-only", base_ref, "--"],
+        committed = subprocess.run(
+            ["git", "diff", "--name-only", f"{base_ref}...HEAD", "--"],
+            capture_output=True, text=True)
+        working = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD", "--"],
             capture_output=True, text=True)
         untracked = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard"],
@@ -268,10 +271,15 @@ def changed_paths_since(base_ref: str) -> set[str] | None:
         errors.append(
             f"git is unavailable; cannot determine eval changes since {base_ref}")
         return None
-    if diff.returncode != 0:
+    if committed.returncode != 0:
         errors.append(
             f"could not determine eval changes since {base_ref}: "
-            f"{diff.stderr.strip() or 'git diff failed'}")
+            f"{committed.stderr.strip() or 'git diff failed'}")
+        return None
+    if working.returncode != 0:
+        errors.append(
+            f"could not determine working-tree eval changes: "
+            f"{working.stderr.strip() or 'git diff failed'}")
         return None
     if untracked.returncode != 0:
         errors.append(
@@ -280,7 +288,10 @@ def changed_paths_since(base_ref: str) -> set[str] | None:
         return None
     return {
         path.replace(os.sep, "/")
-        for path in (*diff.stdout.splitlines(), *untracked.stdout.splitlines())
+        for path in (
+            *committed.stdout.splitlines(),
+            *working.stdout.splitlines(),
+            *untracked.stdout.splitlines())
     }
 
 
