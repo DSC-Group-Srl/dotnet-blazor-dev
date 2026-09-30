@@ -469,6 +469,31 @@ public class RejudgeCommandTests
     }
 
     [TestMethod]
+    public void PairCrossDir_RejectsPluginRoleFamilyMismatch()
+    {
+        var baseline = new[] { Rec("b0", "baseline", 0, "K1") };
+        var skillTreatment = new[]
+        {
+            Rec("iso", "with-skill-isolated", 0, "K1"),
+            Rec("plugin", "with-agent-plugin", 0, "K1"),
+        };
+        var agentTreatment = new[]
+        {
+            Rec("iso", "with-agent-isolated", 0, "K1"),
+            Rec("plugin", "with-skill-plugin", 0, "K1"),
+        };
+
+        foreach (var treatment in new[] { skillTreatment, agentTreatment })
+        {
+            var pairing = RejudgeCommand.PairCrossDir(baseline, treatment);
+            Assert.IsEmpty(pairing.Pairs);
+            Assert.Contains(
+                "role family mismatch",
+                Assert.ContainsSingle(pairing.UnmatchedTreatment));
+        }
+    }
+
+    [TestMethod]
     public void PairCrossDir_RejectsBaselineReuseAcrossTreatmentGroups()
     {
         var baseline = new[] { Rec("b0", "baseline", 0, "K1") };

@@ -598,6 +598,14 @@ public static class RejudgeCommand
             var plugin = pluginSessions.SingleOrDefault();
 
             var key = isolated.BaselineKey;
+            var isAgent = isolated.Role == "with-agent-isolated";
+            if (plugin is not null
+                && plugin.Role != (isAgent ? "with-agent-plugin" : "with-skill-plugin"))
+            {
+                unmatchedTreatment.Add(
+                    $"{FormatSessionIdentity(isolated)}, plugin={FormatSessionIdentity(plugin)} (role family mismatch)");
+                continue;
+            }
             if (plugin is not null
                 && !string.Equals(plugin.BaselineKey, key, StringComparison.Ordinal))
             {
@@ -640,7 +648,7 @@ public static class RejudgeCommand
                 baseline,
                 isolated,
                 plugin,
-                isolated.Role == "with-agent-isolated"));
+                isAgent));
         }
 
         var unmatchedBaseline = baselineRuns
