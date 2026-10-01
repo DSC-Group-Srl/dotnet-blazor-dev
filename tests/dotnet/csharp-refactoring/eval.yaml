@@ -304,8 +304,9 @@ stimuli:
             'csharp-refactoring/references/operation-catalog.md',
             'setup-local-sdk/SKILL.md'};
             actual = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
-            for p in expected if Path(p).is_file()};
-            checked = {p.as_posix() for p in Path('.').rglob('*') if p.is_file()
+            for p in expected if Path(p).is_file() and not Path(p).is_symlink()};
+            checked = {p.as_posix() for p in Path('.').rglob('*')
+            if (p.is_file() or p.is_symlink())
             and not {'bin', 'obj', '.git'}.intersection(p.parts)
             and p.as_posix() not in injected};
             bad = sorted(p for p, digest in expected.items()
