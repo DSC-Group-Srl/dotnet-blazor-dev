@@ -5,6 +5,10 @@ defaults:
   timeout: 15m
 stimuli:
   - name: Rename a shipped public method without breaking existing callers
+    tags:
+      capability: public-api-rename
+      risk: breaking-shipped-api
+      journey: rename-public-api
     prompt: "In the Billing class library, rename the shipped public method `AppSettingsHelper.ParseIntSetting` to `ParseIntegerSetting` and migrate this solution's ordinary callers, while preserving compatibility for existing callers of the old public API. Keep `LegacyParseIntSetting_RemainsCompatible` as a dedicated old-name compatibility test. `PublicAPI.Shipped.txt` records the shipped surface. The solution is at Fixture.sln."
     environment: &fixture-environment
       files:
@@ -93,6 +97,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: file-contains
         config:
@@ -109,6 +114,10 @@ stimuli:
       - Treats PublicAPI.Shipped.txt as evidence that deleting the old method would break a public contract, rather than blindly removing every old-name occurrence
 
   - name: Rename a member declared by a generated partial source
+    tags:
+      capability: generated-partial-rename
+      risk: generated-source-drift
+      journey: rename-generated-member
     prompt: "Rename the private `Coupons.RateFor` helper to `DiscountRateFor` everywhere it is declared and called, preserving behavior. The solution is at Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -133,6 +142,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
@@ -140,6 +150,10 @@ stimuli:
       - Edits Coupons.g.cs.template, the build's source of truth, rather than a generated file under obj
 
   - name: Consolidate duplicate public helpers without breaking shipped callers
+    tags:
+      capability: duplicate-helper-consolidation
+      risk: shipped-api-removal
+      journey: consolidate-public-helpers
     prompt: "`ConfigReader` duplicates the parsing implementation in `AppSettingsHelper`. Consolidate the implementation so there is one source of truth, but preserve the shipped `ConfigReader.ReadInt` and `ReadBool` APIs for existing callers. Migrate this solution's callers where appropriate and verify Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -169,6 +183,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
@@ -176,6 +191,10 @@ stimuli:
       - Preserves the shipped ConfigReader type and methods rather than deleting a public contract during de-duplication
 
   - name: Inline a pass-through wrapper and update callers
+    tags:
+      capability: wrapper-inlining
+      risk: missed-call-sites
+      journey: inline-wrapper
     prompt: "`LegacyTax.ApplyTaxWrapper` does nothing but forward to `TaxRules.Apply`. Inline it: update every caller to call `TaxRules.Apply` directly and remove the wrapper, without changing behavior. The solution is at Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -186,6 +205,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       # The pass-through wrapper is actually gone.
       - type: file-not-contains
@@ -199,6 +219,10 @@ stimuli:
       - Updates every caller to the underlying call and removes the wrapper in one focused operation
 
   - name: Merge two near-identical types into one parameterized type
+    tags:
+      capability: type-consolidation
+      risk: pricing-behavior-drift
+      journey: consolidate-pricing-types
     prompt: "`GoldPricing` and `SilverPricing` are near-identical. Consolidate them into a single parameterized pricing type and update any usages, without changing behavior. The solution is at Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -209,6 +233,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       # The two near-identical classes are actually gone (merged into one type).
       - type: file-not-contains
@@ -226,6 +251,10 @@ stimuli:
       - Updates all usages while preserving existing pricing behavior
 
   - name: Decline a framework and package upgrade dressed up as a refactor
+    tags:
+      capability: upgrade-boundary
+      risk: unsafe-upgrade-as-refactor
+      journey: route-upgrade-request
     prompt: Upgrade the Billing project in Fixture.sln to a newer target framework and bump all its NuGet packages to their latest major versions, treating this as a behavior-preserving refactor.
     environment: *fixture-environment
     graders:
@@ -293,6 +322,10 @@ stimuli:
       - States that no files were changed and directs the request to the dotnet-upgrade workflow
 
   - name: Decline a new-feature request dressed up as a refactor
+    tags:
+      capability: feature-boundary
+      risk: feature-implemented-as-refactor
+      journey: route-feature-request
     prompt: 'In Fixture.sln, add a new "platinum" loyalty tier at 15% off and wire it into the pricing tiers so orders can use it, treating this as a behavior-preserving refactor.'
     environment: *fixture-environment
     graders:
@@ -312,6 +345,10 @@ stimuli:
       - States that no files were changed and directs the request to the repository's feature workflow
 
   - name: Keep behavior-changing bug fixes out of a behavior-preserving refactor
+    tags:
+      capability: mixed-request-separation
+      risk: behavior-change-hidden-in-refactor
+      journey: separate-rename-from-bug-fix
     prompt: "In Fixture.sln, rename `OrderProcessor.DoStuff` to `ComputeInvoice` and, while you are there, change the free-shipping threshold from $100 to $50. Treat the whole change as one behavior-preserving refactor."
     environment: *fixture-environment
     graders:
@@ -332,6 +369,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
@@ -340,6 +378,10 @@ stimuli:
       - Keeps the existing $100 threshold and does not claim the combined request is behavior-preserving
 
   - name: Preserve a serialized name while renaming a C# property
+    tags:
+      capability: serialized-name-preservation
+      risk: wire-contract-break
+      journey: rename-serialized-property
     prompt: "Rename `CustomerProfile.LoyaltyLevel` to `Tier` and migrate its C# callers, but preserve the existing JSON property name so serialized payloads do not change. Verify the solution at Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -360,6 +402,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
@@ -367,6 +410,10 @@ stimuli:
       - Preserves the wire name `LoyaltyLevel` through serialization metadata rather than changing existing payloads to `Tier`
 
   - name: Keep a shipped nullable contract out of a refactor
+    tags:
+      capability: nullable-contract-boundary
+      risk: source-contract-break
+      journey: route-nullability-change
     prompt: "Simplify `AppSettingsHelper.ParseBoolSetting` by changing its shipped `string? raw` parameter to `string raw`. Treat this nullable-annotation cleanup as behavior-preserving and verify Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -384,6 +431,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
@@ -391,6 +439,10 @@ stimuli:
       - Leaves both the declaration and shipped API record unchanged instead of forcing callers to satisfy a newly non-null contract
 
   - name: Rename one binding without touching same-text symbols
+    tags:
+      capability: binding-aware-rename
+      risk: same-text-collision
+      journey: rename-one-symbol
     prompt: "Rename only `OrderProcessor.DoStuff` to `CalculateInvoice` and migrate its callers. Do not rename unrelated members or text that happen to contain `DoStuff`. Verify Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -415,6 +467,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
@@ -422,6 +475,10 @@ stimuli:
       - Leaves the unrelated same-named member and the migration-note string unchanged
 
   - name: Extract subtotal calculation without changing arithmetic
+    tags:
+      capability: method-extraction
+      risk: arithmetic-drift
+      journey: extract-subtotal
     prompt: "Extract the subtotal loop in `OrderProcessor.DoStuff` into a private `CalculateSubtotal` method without changing invoice behavior. Verify Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -450,6 +507,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
@@ -457,6 +515,10 @@ stimuli:
       - Calls the helper from DoStuff and preserves decimal arithmetic, ordering, and invoice results
 
   - name: Rename an internal member used by a friend assembly
+    tags:
+      capability: friend-assembly-rename
+      risk: missed-cross-assembly-caller
+      journey: rename-friend-visible-member
     prompt: "Rename `PricingMath.ApplyDiscount` to `CalculateDiscount` and migrate all callers, including callers from friend assemblies. Preserve behavior and verify Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -481,6 +543,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
@@ -489,6 +552,10 @@ stimuli:
       - The declaration and all friend-assembly callers in Fixture.sln use the new name, with no source reference to the old identifier
 
   - name: Preserve a shipped wrapper while inlining ordinary callers
+    tags:
+      capability: compatibility-wrapper-preservation
+      risk: shipped-wrapper-removal
+      journey: inline-ordinary-callers
     prompt: "Inline uses of `LegacyCurrencyFormatter.FormatCurrency` into `CurrencyFormatter.Format` and migrate this solution's ordinary callers, but preserve compatibility for existing callers of the shipped legacy API. Keep `LegacyCurrencyFormatter_RemainsCompatible` as an old-entry-point compatibility test. Verify Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -535,6 +602,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
@@ -543,6 +611,10 @@ stimuli:
       - Keeps the dedicated compatibility test on the old API so the shim is executed
 
   - name: Rename a method without breaking a configured reflection name
+    tags:
+      capability: reflection-name-preservation
+      risk: configured-name-break
+      journey: rename-reflection-target
     prompt: "Rename the private `ReceiptRenderer.RenderReceipt` implementation to `FormatReceipt` and migrate ordinary C# callers, but preserve the externally configured reflection name `RenderReceipt`. Keep `ReceiptRenderer_ConfiguredOldName_RemainsCompatible` exercising the old configured name and verify Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -571,6 +643,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
@@ -579,6 +652,10 @@ stimuli:
       - Exercises the old configured name after the refactor instead of rewriting the compatibility test
 
   - name: Rename a helper used in every target-framework branch
+    tags:
+      capability: multi-target-rename
+      risk: inactive-branch-drift
+      journey: rename-across-target-frameworks
     prompt: "Rename `PlatformInfo.Label` to `FormatLabel` everywhere it is declared and used, including every conditional-compilation branch, without changing the platform labels. Validate both target frameworks in Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -599,18 +676,24 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --framework net8.0 --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: run-command
         config:
           command: dotnet test Fixture.sln --framework net10.0 --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
-      - Renames the declaration and references in every #if branch
+      - "Renames the declaration and references in every #if branch"
       - Preserves the net8 and net10 platform-label values
 
   - name: Extract shared discount logic without collapsing distinct inputs
+    tags:
+      capability: discount-extraction
+      risk: collapsed-distinct-inputs
+      journey: extract-shared-discount-logic
     prompt: "Refactor the duplicated tier-discount calculations in `OrderProcessor.DoStuff` into one private `ApplyTierDiscount(decimal amount, string tier)` helper. Preserve the existing difference between the invoice total base and quote base, including shipping, and verify Fixture.sln."
     environment: *fixture-environment
     graders:
@@ -634,6 +717,7 @@ stimuli:
         config:
           command: dotnet test Fixture.sln --verbosity normal
           expected_exit_code: 0
+          stdout_contains: "Total tests: 17"
           timeout: 5m
       - type: prompt
     rubric:
@@ -642,6 +726,10 @@ stimuli:
       - Avoids collapsing the two calculations into one result merely because their tier-rate selection is duplicated
 
   - name: Stay dormant for an ordinary feature request
+    tags:
+      capability: feature-request-dormancy
+      risk: incorrect-skill-activation
+      journey: route-ordinary-feature
     prompt: Add a platinum loyalty tier at 15% off and make it available to orders.
     environment: *fixture-environment
     expect_activation: false
