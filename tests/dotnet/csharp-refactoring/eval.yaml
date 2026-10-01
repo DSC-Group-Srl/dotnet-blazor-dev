@@ -290,6 +290,7 @@ stimuli:
     rubric:
       - Recognizes that a framework or package major-version upgrade is not a behavior-preserving refactor
       - Does not silently perform a behavior-changing version bump under the guise of refactoring
+      - States that no files were changed and directs the request to the dotnet-upgrade workflow
 
   - name: Decline a new-feature request dressed up as a refactor
     prompt: 'In Fixture.sln, add a new "platinum" loyalty tier at 15% off and wire it into the pricing tiers so orders can use it, treating this as a behavior-preserving refactor.'
@@ -308,6 +309,7 @@ stimuli:
     rubric:
       - Recognizes that adding a new pricing tier is a new feature, not a behavior-preserving refactor
       - Leaves the pricing behavior unchanged and does not claim the requested feature is behavior-preserving
+      - States that no files were changed and directs the request to the repository's feature workflow
 
   - name: Keep behavior-changing bug fixes out of a behavior-preserving refactor
     prompt: "In Fixture.sln, rename `OrderProcessor.DoStuff` to `ComputeInvoice` and, while you are there, change the free-shipping threshold from $100 to $50. Treat the whole change as one behavior-preserving refactor."
