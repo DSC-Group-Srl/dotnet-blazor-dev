@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -22,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "evaluation-run.yml"
 CALLER_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "evaluation.yml"
 TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "evaluation-workflow-tests.yml"
+EVAL_QUALITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "eval-quality.yml"
 DASHBOARD_GENERATOR = REPO_ROOT / "eng" / "dashboard" / "generate-benchmark-data.ps1"
 PATH_SAFETY_SCRIPT = REPO_ROOT / "eng" / "evaluation" / "path-safety.ps1"
 FIND_TARGETS_SCRIPT = REPO_ROOT / "eng" / "evaluation" / "find-targets.ps1"
@@ -378,20 +380,21 @@ class TokenFailoverTests(unittest.TestCase):
             ("issue_comment", "/evaluate", "", "", ["claude-sonnet-5", "gpt-5.6-luna"]),
             ("pull_request_review", "/evaluate --full", "", "", [
                 "claude-sonnet-5", "gpt-5.6-luna", "claude-haiku-4.5",
-                "mai-code-1.1-flash", "gpt-5.3-codex", "claude-opus-4.8",
+                "mai-code-1.1-flash", "gpt-5.3-codex",
             ]),
             ("workflow_dispatch", "", "newer", "", [
-                "gpt-5.6-sol", "claude-opus-5", "claude-sonnet-5",
+                "gpt-6-astra", "claude-opus-5",
             ]),
             ("schedule", "", "", "0 7 * * 1,3,5", ["claude-sonnet-5", "gpt-5.6-luna"]),
             ("schedule", "", "", "0 7 * * 2,6", [
                 "claude-haiku-4.5", "mai-code-1.1-flash", "gpt-5.3-codex",
             ]),
             ("schedule", "", "", "0 7 * * 0", [
-                "gpt-5.6-sol", "claude-opus-5", "claude-sonnet-5",
+                "gpt-6-astra", "claude-opus-5",
             ]),
-            ("schedule", "", "", "0 7 * * 4", ["claude-opus-4.8"]),
-            ("workflow_dispatch", "", "opus48", "", ["claude-opus-4.8"]),
+            ("schedule", "", "", "0 7 * * 4", ["gpt-5.6-sol"]),
+            ("issue_comment", "/evaluate --sol", "", "", ["gpt-5.6-sol"]),
+            ("workflow_dispatch", "", "sol", "", ["gpt-5.6-sol"]),
         ]
         for event, body, profile, schedule, models in cases:
             with self.subTest(event=event, profile=profile, schedule=schedule):
@@ -408,11 +411,8 @@ class TokenFailoverTests(unittest.TestCase):
                 self.assertEqual([entry["model"] for entry in entries], models)
                 for entry in entries:
                     is_gpt = entry["model"].startswith("gpt-")
-                    self.assertEqual(entry["judge"], "claude-opus-4.8" if is_gpt else "gpt-5.6-terra")
-                    self.assertEqual(
-                        entry["judge2"],
-                        "claude-haiku-4.5" if is_gpt and event == "schedule" else "",
-                    )
+                    self.assertEqual(entry["judge"], "claude-haiku-4.5" if is_gpt else "gpt-5.6-terra")
+                    self.assertNotIn("judge2", entry)
                     self.assertNotEqual(entry["judge"], entry["model"])
 
     def test_health_and_triage_models_are_separate_from_evaluation(self) -> None:
@@ -1588,29 +1588,30 @@ None found.
             )
         )
 
-        setup_sha = "5e508589e03a7757a7e05b26e834292f5445bfb6"
-        for action in ("setup", "setup-cli"):
-            entry = actions_lock["entries"][
-                f"github/gh-aw-actions/{action}@v0.88.7"
-            ]
-            self.assertEqual(entry["version"], "v0.88.7")
-            self.assertEqual(entry["sha"], setup_sha)
+        setup_sha = "e93dc06546adbe250a4bdf7d27cee653f22312a0"
+        self.assertFalse(
+            any(
+                key.startswith("github/gh-aw-actions/")
+                for key in actions_lock["entries"]
+            ),
+            "explicitly SHA-pinned gh-aw action refs should not require cache entries",
+        )
 
         expected_containers = {
-            "ghcr.io/github/gh-aw-firewall/agent:0.28.14":
-                "sha256:f7df036c86575527b61f3f7df91c4412349a12b2a74988d929eafa2999230c98",
-            "ghcr.io/github/gh-aw-firewall/api-proxy:0.28.14":
-                "sha256:6f95e2234dd9bd6333a8ff28ccea7ecf0204acd4a09108723844dbd2bf6268c5",
-            "ghcr.io/github/gh-aw-firewall/squid:0.28.14":
-                "sha256:2ce8df3abf3e9b76e9c0cf5863da41f1ab3f89b20ad14b988806ab89e7bf2cd5",
-            "ghcr.io/github/gh-aw-mcpg:v0.4.18":
-                "sha256:85b940556a8faa4e1fdbef124bfd75f2c4ebd855a10b88a1c3b6f3e97f6f1a53",
+            "ghcr.io/github/gh-aw-firewall/agent:0.28.16":
+                "sha256:57a3e27388a6d7d32719088581e52567727fa0bf2f0d477bf565b0c4baa12a3f",
+            "ghcr.io/github/gh-aw-firewall/api-proxy:0.28.16":
+                "sha256:cd400948638ffe1b87ec319abf73fa29b6ac9881b015da58bba971c4cc13a400",
+            "ghcr.io/github/gh-aw-firewall/squid:0.28.16":
+                "sha256:452197f2e241b2cda8eb0b5674960aa8ca544a64dc242e24f8263c3df6452919",
+            "ghcr.io/github/gh-aw-mcpg:v0.4.21":
+                "sha256:f26f665840660581510746ed84f5fc706f4ca8c48833757dfb4d72d86587201e",
         }
         expected_executable_images = {
             f"{image}@{digest}"
             for image, digest in expected_containers.items()
         }
-        expected_executable_images.add("ghcr.io/github/gh-aw-mcpg:v0.4.18")
+        expected_executable_images.add("ghcr.io/github/gh-aw-mcpg:v0.4.21")
 
         def gh_aw_action_refs(text: str) -> set[tuple[str, str]]:
             return set(
@@ -1656,7 +1657,7 @@ None found.
                         executable_lock,
                     )
                 )
-                self.assertIn('"compiler_version":"v0.88.7"', lock)
+                self.assertIn('"compiler_version":"v0.89.15"', lock)
                 self.assertEqual(
                     gh_aw_action_refs(executable_lock),
                     {("setup", setup_sha)},
@@ -1678,13 +1679,13 @@ None found.
             gh_aw_action_refs(executable_lines(setup)),
             {("setup-cli", setup_sha)},
         )
-        self.assertIn("version: v0.88.7", setup)
+        self.assertIn("version: v0.89.15", setup)
 
         maintenance = (workflows / "agentics-maintenance.yml").read_text(
             encoding="utf-8"
         )
         self.assertIn(
-            "generated by pkg/workflow/maintenance_workflow.go (v0.88.7)",
+            "generated by pkg/workflow/maintenance_workflow.go (v0.89.15)",
             maintenance,
         )
         self.assertEqual(
@@ -1739,9 +1740,20 @@ case "$COPILOT_GITHUB_TOKEN" in
   status-429) echo "Request failed with status code 429" >&2; exit 1 ;;
   too-many-requests) echo "Too Many Requests" >&2; exit 1 ;;
   weekly-message) echo "You have reached your weekly rate limit" >&2; exit 1 ;;
+  quota-exceeded) echo '{"type":"session.error","data":{"errorType":"quota","message":"You have exceeded your monthly quota","statusCode":402,"errorCode":"quota_exceeded"}}' >&2; exit 1 ;;
+  status-402) echo "Request failed with status code 402" >&2; exit 1 ;;
   timed-out) exit 124 ;;
   unauthorized) echo "401 Unauthorized" >&2; exit 7 ;;
   unauthorized-after-effort) echo "401 Unauthorized after effort retry" >&2; exit 7 ;;
+  no-auth-guidance)
+    echo "To authenticate, you can use any of the following methods:" >&2
+    echo "  • Start 'copilot' and run the '/login' command" >&2
+    echo "  • Set the COPILOT_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN environment variable" >&2
+    echo "  • Run 'gh auth login' to authenticate with the GitHub CLI" >&2
+    exit 1
+    ;;
+  auth-heading-only) echo "To authenticate, you can use any of the following methods:" >&2; exit 9 ;;
+  auth-env-only) echo "Set the COPILOT_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN environment variable" >&2; exit 9 ;;
   disabled) echo "This organization has been disabled" >&2; exit 8 ;;
   service-error) echo "Unexpected internal service failure" >&2; exit 9 ;;
   model-error) echo "Model gpt-401 not found" >&2; exit 10 ;;
@@ -1822,6 +1834,8 @@ esac
             "status-429",
             "too-many-requests",
             "weekly-message",
+            "quota-exceeded",
+            "status-402",
         ):
             with self.subTest(limited_token=limited_token):
                 result = self.run_selector({0: limited_token, 1: "healthy"})
@@ -1899,7 +1913,11 @@ esac
         self.assertIn("401 Unauthorized after effort retry", result.stdout)
 
     def test_unavailable_candidate_fails_over_to_healthy_candidate(self) -> None:
-        for unavailable_token in ("unauthorized", "disabled"):
+        for unavailable_token in (
+            "unauthorized",
+            "no-auth-guidance",
+            "disabled",
+        ):
             with self.subTest(unavailable_token=unavailable_token):
                 result = self.run_selector(
                     {0: unavailable_token, 1: "healthy"}
@@ -1915,7 +1933,12 @@ esac
                 )
 
     def test_unrelated_failure_does_not_try_another_candidate(self) -> None:
-        for failing_token in ("service-error", "model-error"):
+        for failing_token in (
+            "service-error",
+            "model-error",
+            "auth-heading-only",
+            "auth-env-only",
+        ):
             with self.subTest(failing_token=failing_token):
                 result = self.run_selector(
                     {0: failing_token, 1: "healthy"}
@@ -2010,6 +2033,9 @@ esac
             "user_weekly_rate_limited",
             "Too Many Requests",
             "You have reached your weekly rate limit",
+            '"errorCode":"quota_exceeded"',
+            "You have exceeded your monthly quota",
+            "Request failed with status code 402",
         ):
             env = os.environ.copy()
             env.update({"PATTERN": pattern, "MESSAGE": message})
@@ -2184,6 +2210,22 @@ esac
         adapter_path = "eng/vally-adapter/**"
         for event in ("pull_request", "push"):
             self.assertEqual(triggers[event]["paths"].count(adapter_path), 1)
+            self.assertEqual(
+                triggers[event]["paths"].count(".github/scripts/**"),
+                1,
+            )
+            self.assertEqual(
+                triggers[event]["paths"].count(
+                    "eng/evaluation/test_pr_triage_retry.py"
+                ),
+                1,
+            )
+            self.assertEqual(
+                triggers[event]["paths"].count(
+                    ".github/workflows/pr-triage.yml"
+                ),
+                1,
+            )
 
         job = workflow["jobs"]["vally-adapter"]
         self.assertEqual(job["runs-on"], "ubuntu-latest")
@@ -2191,6 +2233,17 @@ esac
         self.assertIn(
             "node --test eng/vally-adapter/*.test.mjs",
             steps["Run adapter fault-injection and report tests"]["run"],
+        )
+        tools_job = workflow["jobs"]["token-failover"]
+        tools_steps = {step.get("name"): step for step in tools_job["steps"]}
+        workflow_tests = tools_steps["Test evaluation workflow behavior"]["run"]
+        self.assertIn(
+            "python eng/evaluation/test_token_failover.py",
+            workflow_tests,
+        )
+        self.assertIn(
+            "python eng/evaluation/test_pr_triage_retry.py",
+            workflow_tests,
         )
 
     def test_manual_eval_data_publish_is_explicit_and_main_only(self) -> None:
@@ -2264,6 +2317,147 @@ esac
         )
         self.assertNotIn("re-post `/evaluate`", script)
 
+    def test_pr_session_publish_failure_is_visible_but_non_authoritative(self) -> None:
+        workflow = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
+        publish_job = workflow["jobs"]["publish-session-data"]
+        self.assertEqual(
+            publish_job["continue-on-error"],
+            "${{ needs.gate.outputs.pr_number != '' }}",
+        )
+        self.assertEqual(
+            publish_job["outputs"]["status"],
+            "${{ steps.publish-status.outputs.status }}",
+        )
+
+        steps = {step.get("name"): step for step in publish_job["steps"]}
+        auth_script = steps["Validate session data credentials"]["run"]
+        self.assertIn('push --dry-run "$REPO_URL"', auth_script)
+        self.assertIn(
+            "Session telemetry token is missing",
+            auth_script,
+        )
+        self.assertIn(
+            "Session data token is missing",
+            auth_script,
+        )
+        self.assertIn(
+            "Session telemetry write preflight failed",
+            auth_script,
+        )
+        self.assertIn(
+            "Session data write preflight failed",
+            auth_script,
+        )
+        self.assertIn(
+            "credential-bearing remote output was suppressed",
+            auth_script,
+        )
+        self.assertIn("commit --allow-empty", auth_script)
+        self.assertIn("session-data-auth-preflight-", auth_script)
+        self.assertLess(
+            [step.get("name") for step in publish_job["steps"]].index(
+                "Validate session data credentials"
+            ),
+            [step.get("name") for step in publish_job["steps"]].index(
+                "Checkout repository"
+            ),
+        )
+        self.assertEqual(
+            steps["Validate session data credentials"]["continue-on-error"],
+            "${{ needs.gate.outputs.pr_number != '' }}",
+        )
+        self.assertEqual(
+            steps["Checkout repository"]["if"],
+            "steps.auth.outcome == 'success'",
+        )
+        self.assertEqual(
+            steps["Download evaluation artifacts"]["if"],
+            "steps.auth.outcome == 'success' && steps.checkout.outcome == 'success'",
+        )
+        self.assertEqual(
+            steps["Determine source metadata"]["if"],
+            "steps.download.outcome == 'success'",
+        )
+        self.assertEqual(
+            steps["Build session manifest"]["if"],
+            "steps.meta.outcome == 'success'",
+        )
+        self.assertEqual(
+            steps["Clone existing session data branch"]["if"],
+            "steps.build.outcome == 'success'",
+        )
+        self.assertEqual(
+            steps["Merge and purge old sessions"]["if"],
+            "steps.clone.outcome == 'success'",
+        )
+        self.assertEqual(
+            steps["Push to dashboard-session-data branch (dotnet/skills-data)"]["if"],
+            "steps.merge.outcome == 'success'",
+        )
+        for name in (
+            "Checkout repository",
+            "Inspect downloaded artifacts",
+            "Determine source metadata",
+            "Build session manifest",
+            "Clone existing session data branch",
+            "Merge and purge old sessions",
+            "Push to dashboard-session-data branch (dotnet/skills-data)",
+        ):
+            self.assertEqual(
+                steps[name]["continue-on-error"],
+                "${{ needs.gate.outputs.pr_number != '' }}",
+            )
+        self.assertIn(
+            "needs.gate.outputs.pr_number != '' || needs.evaluate.result != 'success'",
+            steps["Download evaluation artifacts"]["continue-on-error"],
+        )
+        status_step = steps["Report session publishing outcome"]
+        self.assertEqual(status_step["if"], "always()")
+        self.assertEqual(
+            status_step["env"]["DOWNLOAD_OUTCOME"],
+            "${{ steps.download.outcome }}",
+        )
+        status_script = status_step["run"]
+        self.assertIn('"$OUTCOMES" == *skipped*', status_script)
+        self.assertIn('echo "status=degraded"', status_script)
+        self.assertIn(
+            "Evaluation results remain authoritative",
+            status_script,
+        )
+        self.assertIn('echo "status=failed"', status_script)
+        self.assertIn(
+            "Scheduled/main publishing is strict",
+            status_script,
+        )
+
+        comment_steps = {
+            step.get("name"): step
+            for step in workflow["jobs"]["comment-on-pr"]["steps"]
+        }
+        comment_script = comment_steps["Consolidate and post results"]["run"]
+        self.assertIn(
+            'needs.publish-session-data.outputs.status',
+            comment_script,
+        )
+        self.assertIn(
+            "Session replay telemetry was not published",
+            comment_script,
+        )
+        self.assertIn(
+            'needs.publish-session-data.outputs.status }}" == "published"',
+            comment_script,
+        )
+        self.assertNotIn(
+            'needs.publish-session-data.result }}" == "success"',
+            comment_script,
+        )
+
+        deploy_condition = workflow["jobs"]["deploy-dashboard"]["if"]
+        self.assertNotIn(
+            "needs.publish-session-data.outputs.status",
+            deploy_condition,
+        )
+
     def test_partial_matrix_results_never_become_complete_verdicts(self) -> None:
         caller = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
         comment_job = caller["jobs"]["comment-on-pr"]
@@ -2282,6 +2476,11 @@ esac
             "${{ needs.discover.outputs.entries }}",
         )
         script = consolidate_step["run"]
+        self.assertIn(
+            "find all-results/ -name results.json "
+            "-not -path '*/_agent-timeout-retry/*'",
+            script,
+        )
         incomplete_guard = (
             'if [[ "$MATRIX_MANIFEST_VALID" != "true" '
             '|| "$EVALUATE_RESULT" != "success" '
@@ -2338,6 +2537,90 @@ esac
             runner_steps["Upload results"]["with"]["if-no-files-found"],
             "error",
         )
+
+    def test_execution_shard_uses_only_top_level_tags(self) -> None:
+        caller = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
+        discover_script = workflow_step_script(
+            caller, "discover", "function Get-PluginShardEntries"
+        )
+        start = discover_script.index("function Get-EvalExecutionShard")
+        end = discover_script.index(
+            'if ("$env:GATE_PR_NUMBER"', start
+        )
+        functions = discover_script[start:end]
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for skill in ("top-level", "nested-only"):
+                (root / "plugins" / "demo" / "skills" / skill).mkdir(parents=True)
+                (root / "tests" / "demo" / skill).mkdir(parents=True)
+                (root / "plugins" / "demo" / "skills" / skill / "SKILL.md").write_text(
+                    "# Skill", encoding="utf-8"
+                )
+            (root / "tests" / "demo" / "top-level" / "eval.yaml").write_text(
+                "tags:\n"
+                "  executionShard: heavy\n"
+                "stimuli:\n"
+                "  - name: Scenario\n"
+                "    tags:\n"
+                "      executionShard: nested\n",
+                encoding="utf-8",
+            )
+            (root / "tests" / "demo" / "nested-only" / "eval.yaml").write_text(
+                "stimuli:\n"
+                "  - name: Scenario\n"
+                "    tags:\n"
+                "      executionShard: nested\n",
+                encoding="utf-8",
+            )
+            script = (
+                "$ErrorActionPreference = 'Stop'\n"
+                + functions
+                + f"\n$root = '{str(root).replace(chr(39), chr(39) * 2)}'\n"
+                + "$entries = @(Get-PluginShardEntries -plugin demo -contentRoot $root)\n"
+                + "ConvertTo-Json -InputObject @($entries) -Compress\n"
+            )
+            result = subprocess.run(
+                ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            entries = json.loads(result.stdout.strip().splitlines()[-1])
+            self.assertEqual(
+                {entry["name"] for entry in entries},
+                {"demo--shard-default", "demo--shard-heavy"},
+            )
+
+    def test_manual_eval_quality_uses_main_as_comparison_base(self) -> None:
+        workflow = yaml.safe_load(EVAL_QUALITY_WORKFLOW.read_text(encoding="utf-8"))
+        script = workflow_step_script(
+            workflow, "check", 'EVENT_NAME" = "workflow_dispatch'
+        )
+
+        self.assertIn('COMPARISON_REF="origin/main"', script)
+        self.assertIn('python eng/eval-quality/check_eval_quality.py --base-ref "$COMPARISON_REF"', script)
+        manual_branch = script.split(
+            'elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then',
+            maxsplit=1,
+        )[1].split("fi", maxsplit=1)[0]
+        self.assertNotIn("--all", manual_branch)
+
+    def test_eval_quality_contract_changes_audit_every_spec(self) -> None:
+        workflow = yaml.safe_load(EVAL_QUALITY_WORKFLOW.read_text(encoding="utf-8"))
+        script = workflow_step_script(
+            workflow, "check", "Repository-wide contract audit"
+        )
+
+        self.assertIn("check_eval_quality.py --all", script)
+        self.assertIn("checked all ", script)
+        self.assertIn("current_count < base_count", script)
+        self.assertRegex(
+            script,
+            r"eng/eval-quality/\(check_eval_quality\|selftest_eval_quality\)",
+        )
+        self.assertIn("eng/vally-adapter/adapt", script)
 
     def test_fork_checkout_is_blocked_and_adapter_code_is_trusted(self) -> None:
         workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
@@ -2450,10 +2733,14 @@ esac
             run_script.count(
                 '--expected-evals "$RUNNER_TEMP/evaluation-expected-evals.txt"'
             ),
-            3,
+            2,
         )
         self.assertIn(
             'if [ "$PRODUCED" -ne "$EXPECTED_EVAL_COUNT" ]',
+            run_script,
+        )
+        self.assertIn(
+            '-not -path "$RESULTS_DIR/_agent-timeout-retry/*"',
             run_script,
         )
         self.assertIn("s.expectedManifestProvided === true", run_script)
@@ -2471,6 +2758,22 @@ esac
         )
         self.assertIn(
             '--max-groups 3',
+            run_script,
+        )
+        self.assertIn(
+            '--max-attempts-per-group 2',
+            run_script,
+        )
+        self.assertIn(
+            "timeout --signal=TERM --kill-after=30s 45m",
+            run_script,
+        )
+        self.assertIn(
+            '--max-scenario-seconds 1200',
+            run_script,
+        )
+        self.assertIn(
+            '--scenario-overhead-seconds 300',
             run_script,
         )
         self.assertIn(
@@ -2516,13 +2819,47 @@ esac
         self.assertIn(f"node {trusted_adapter}gen-experiment.mjs", run_script)
         self.assertIn(f"node {trusted_adapter}adapt.mjs", run_script)
         self.assertIn(f"node {trusted_adapter}adapt-agent-results.mjs", run_script)
+        self.assertEqual(run_script.count("adapt-agent-results.mjs"), 1)
         self.assertIn('"$RUNNER_TEMP/trusted-validator/skill-validator" evaluate', run_script)
+        self.assertIn(
+            '--retry-results-dir "$RUNNER_TEMP/agent-timeout-retry"',
+            run_script,
+        )
+        self.assertIn(
+            '--retry-audit-dir "$RESULTS_DIR/_agent-timeout-retry"',
+            run_script,
+        )
+        self.assertNotIn(
+            '--retry-results-dir "$RESULTS_DIR',
+            run_script,
+        )
+        self.assertIn("raw result is renamed retry-results.json", run_script)
+        self.assertIn("--keep-sessions", run_script)
         self.assertIn('rm -f "${AGENT_RESULTS[0]}"', run_script)
         self.assertGreater(
             run_script.index('rm -f "${AGENT_RESULTS[0]}"'),
             run_script.index(f"node {trusted_adapter}adapt-agent-results.mjs"),
         )
+        self.assertNotIn('rm -rf "$RESULTS_DIR/_agent-timeout-retry"', run_script)
+        self.assertIn(
+            '-not -path "$RESULTS_DIR/_agent-timeout-retry/*"',
+            summary_script,
+        )
         self.assertNotIn("node eng/vally-adapter/", run_script)
+
+        caller = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
+        caller_scripts = "\n".join(
+            step.get("run", "")
+            for job in caller["jobs"].values()
+            for step in job.get("steps", [])
+        )
+        self.assertGreaterEqual(
+            caller_scripts.count(
+                "Where-Object { $_.FullName -notmatch "
+                "'[\\\\/]_agent-timeout-retry[\\\\/]' }"
+            ),
+            2,
+        )
 
     def test_discovery_creates_first_class_agent_matrix_entries(self) -> None:
         caller = yaml.safe_load(CALLER_WORKFLOW.read_text(encoding="utf-8"))
@@ -2556,6 +2893,21 @@ esac
         self.assertIn('if [ "$TARGET_KIND" = "agent" ]', run)
         self.assertIn("--verdict-warn-only", run)
         self.assertIn("--keep-sessions", run)
+        native_eval = '"$RUNNER_TEMP/trusted-validator/skill-validator" evaluate'
+        agent_branch = run.index('if [ "$TARGET_KIND" = "agent" ]')
+        self.assertLess(
+            run.index("set +e", agent_branch),
+            run.index(native_eval),
+        )
+        self.assertIn("AGENT_EVAL_STATUS=$?", run)
+        self.assertIn(
+            'if [ "$AGENT_EVAL_STATUS" -ne 0 ]; then',
+            run,
+        )
+        self.assertIn(
+            "attempting bounded recovery and adapting the preserved result",
+            run,
+        )
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2582,7 +2934,7 @@ esac
             (root / "tests" / "demo" / "nested" / "agent.router" / "eval.yaml").write_text(
                 "name: agent.router\nstimuli: []\n", encoding="utf-8")
 
-            start = discover_script.index("function Get-PluginShardEntries")
+            start = discover_script.index("function Get-EvalExecutionShard")
             end = discover_script.index(
                 'if ("$env:GATE_PR_NUMBER"', start)
             functions = discover_script[start:end]
@@ -3038,10 +3390,82 @@ esac
         self.assertIn("v.state == null", summary_script)
 
         caller_text = CALLER_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("primaryState = $p.state", caller_text)
+        self.assertNotIn("Generate judge-comparison data", caller_text)
+        self.assertNotIn("all-crossjudge", caller_text)
+        self.assertIn('Group-Object -Property { "$($_.Json.model)|$($_.Json.judgeModel)" }', caller_text)
+
+
+class AgentTimeoutRetryQuarantineTests(unittest.TestCase):
+    """The agent timeout-retry tree must never yield a collectable results.json.
+
+    Retry aggregates are staged outside RESULTS_DIR, so TERM/KILL cannot leave
+    one in the uploaded tree. Completed sessions, logs, and a renamed raw result
+    are copied into the audit subtree, which every recursive collector excludes.
+    """
+
+    RETRY_DIR = "_agent-timeout-retry"
+
+    def _run_script(self) -> str:
+        workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        steps = workflow["jobs"]["vally-evaluate"]["steps"]
+        return next(
+            step["run"] for step in steps if step.get("name") == "Run vally evaluations"
+        )
+
+    def test_retry_results_are_staged_outside_results_dir(self) -> None:
+        script = self._run_script()
         self.assertIn(
-            "$p.preferenceRegressed -eq $s.preferenceRegressed",
-            caller_text,
+            '--retry-results-dir "$RUNNER_TEMP/agent-timeout-retry"',
+            script,
+        )
+        self.assertIn(
+            f'--retry-audit-dir "$RESULTS_DIR/{self.RETRY_DIR}"',
+            script,
+        )
+        self.assertNotIn('--retry-results-dir "$RESULTS_DIR', script)
+
+    def test_retry_budget_is_wired_to_the_outer_watchdog(self) -> None:
+        script = self._run_script()
+        self.assertIn(
+            "timeout --signal=TERM --kill-after=30s 45m",
+            script,
+        )
+        self.assertIn("--max-scenarios 2", script)
+        self.assertIn("--max-scenario-seconds 1200", script)
+        self.assertIn("--scenario-overhead-seconds 300", script)
+
+    def test_recursive_collectors_exclude_the_retry_tree(self) -> None:
+        # Scan the whole workflow: the produced-result count and the per-skill
+        # summary loop live in different steps, and both walk RESULTS_DIR.
+        workflow_text = WORKFLOW.read_text(encoding="utf-8")
+        finds = [
+            line
+            for line in workflow_text.splitlines()
+            if "find " in line and "-name results.json" in line
+        ]
+        # The AGENT_RAW_DIR probe runs before the retry directory can exist.
+        scoped = [
+            line
+            for line in finds
+            if "$RESULTS_DIR" in line and f'"$RESULTS_DIR/{self.RETRY_DIR}"' not in line
+        ]
+        self.assertGreaterEqual(len(scoped), 2)
+        for line in scoped:
+            with self.subTest(line=line.strip()):
+                self.assertIn(f'-not -path "$RESULTS_DIR/{self.RETRY_DIR}/*"', line)
+
+        caller = CALLER_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn(
+            "find all-results/ -name results.json "
+            f"-not -path '*/{self.RETRY_DIR}/*'",
+            caller,
+        )
+        self.assertEqual(
+            caller.count(
+                r"Where-Object { $_.FullName -notmatch "
+                rf"'[\\/]{self.RETRY_DIR}[\\/]' }}"
+            ),
+            2,
         )
 
 
