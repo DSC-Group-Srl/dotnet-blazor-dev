@@ -9,11 +9,16 @@ import test from "node:test";
 import {
   comparisonToVerdict,
   classifyComparisonError,
+  continuedAfterSkillActivation,
   mergeComparisonReports,
+  postActivationFromRecords,
+  readNonActivationStimuli,
+  recoverTransientComparisonSlots,
   splitVallyCommand,
   signTestPValue,
   trialDirection,
   VERDICT_STATES,
+  MAX_TARGETED_COMPARISON_SLOTS,
   MIN_CREDIBLE_STIMULI,
   MIN_PRACTICAL_NET_WIN,
   SIGN_TEST_ALPHA,
@@ -162,27 +167,26 @@ function runAdapter(
   trialCount = 5,
   expectedEvalFiles = [evalFile],
   experimentFactory = createExperiment,
+  repoRoot,
 ) {
   const runDir = experimentFactory(root);
   const outputRoot = join(root, "output");
   const expectedEvalsPath = join(root, "expected-evals.txt");
   writeFileSync(expectedEvalsPath, `${expectedEvalFiles.join("\n")}\n`);
   const fakeVally = createFakeVally(root, mode, trialCount);
-  const result = spawnSync(
-    process.execPath,
-    [
-      adapterPath,
-      "--experiment-dir",
-      runDir,
-      "--output-root",
-      outputRoot,
-      "--vally",
-      fakeVally.command,
-      "--expected-evals",
-      expectedEvalsPath,
-    ],
-    { encoding: "utf8" },
-  );
+  const args = [
+    adapterPath,
+    "--experiment-dir",
+    runDir,
+    "--output-root",
+    outputRoot,
+    "--vally",
+    fakeVally.command,
+    "--expected-evals",
+    expectedEvalsPath,
+  ];
+  if (repoRoot) args.push("--repo-root", repoRoot);
+  const result = spawnSync(process.execPath, args, { encoding: "utf8" });
   const verdictPath = join(
     outputRoot,
     "dotnet-diag",
@@ -224,6 +228,7 @@ test("retries a transient comparison error once", () => {
     assert.equal(verdict.underpowered, false);
     assert.equal(verdict.passed, true);
     assert.equal(verdict.state, VERDICT_STATES.VALID_PASS);
+    assert.equal(verdict.skillKind, "skill");
     assert.equal(verdict.recoveredErrors.length, 5);
     assert.match(processOutput(result), /without replacing successful judgments/);
   });
@@ -313,6 +318,31 @@ test("a malformed comparison report becomes one explicit invalid result", () => 
   });
 });
 
+test("an unreadable eval spec becomes one measurement-invalid result", () => {
+  withTempDir((root) => {
+    const { result, compareCount, verdict, outputRoot } = runAdapter(
+      root,
+      "clean",
+      5,
+      [evalFile],
+      createExperiment,
+      root,
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(compareCount, undefined);
+    assert.equal(verdict.state, VERDICT_STATES.INVALID_INCONCLUSIVE);
+    assert.equal(verdict.stateReason.code, "eval_spec_unreadable");
+    assert.equal(verdict.errors[0].phase, "adapter");
+    assert.match(verdict.errors[0].message, /cannot read eval spec/);
+
+    const summary = JSON.parse(readFileSync(join(outputRoot, "adapter-summary.json"), "utf8"));
+    assert.equal(summary.invalidEvalCount, 1);
+    assert.equal(summary.measurementInvalidEvalCount, 1);
+    assert.deepEqual(summary.measurementInvalidEvals, [evalFile]);
+  });
+});
+
 test("keeps a persistent comparison error visible after one retry", () => {
   withTempDir((root) => {
     const { result, compareCount, verdict } = runAdapter(root, "persistent");
@@ -367,7 +397,7 @@ test("reports a below-floor eval as underpowered rather than as a measurement fa
     assert.equal(verdict.state, VERDICT_STATES.INVALID_INCONCLUSIVE);
     assert.equal(verdict.stateReason.code, "underpowered");
     assert.equal(verdict.minCredibleTrials, 5);
-    assert.match(verdict.reason, /underpowered \(1 counted stimulus vote\(s\); a credible verdict needs at least 5/);
+    assert.match(verdict.reason, /underpowered \(1 preference-eligible stimulus vote\(s\); a credible verdict needs at least 5/);
     assert.match(verdict.reason, /won every one of them/);
     assert.match(verdict.reason, /repeated runs do not increase task breadth/);
     assert.match(result.stdout, /⚠️/);
@@ -404,6 +434,10 @@ test("writes an explicit invalid verdict for every expected eval", () => {
     assert.equal(
       missingResult.verdicts[0].stateReason.code,
       "missing_baseline_and_skilled_records",
+    );
+    assert.deepEqual(
+      missingResult.verdicts[0].activationContract.unmatchedDormancyStimuli,
+      [],
     );
 
     const summary = JSON.parse(readFileSync(join(outputRoot, "adapter-summary.json"), "utf8"));
@@ -537,6 +571,317 @@ const reportFromRepeatedScores = (scores, summaryOverrides = {}) =>
 
 const gate = (scores, summaryOverrides) =>
   comparisonToVerdict(reportFromScores(scores, summaryOverrides), IDENTITY, EMPTY_ROLES, new Set());
+
+test("ordered events require a non-skill tool call after activation", () => {
+  assert.equal(
+    continuedAfterSkillActivation({
+      trajectory: {
+        events: [
+          { type: "tool_call", data: { toolName: "view" } },
+          { type: "tool_call", data: { toolName: "skill" } },
+          { type: "skill_activation", data: { name: "example" } },
+        ],
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    continuedAfterSkillActivation({
+      trajectory: {
+        events: [
+          { type: "tool_call", data: { toolName: "skill" } },
+          { type: "skill_activation", data: { name: "example" } },
+          { type: "tool_call", data: { toolName: "view" } },
+        ],
+      },
+    }),
+    true,
+  );
+});
+
+test("post-activation telemetry distinguishes continuation from activation-only completion", () => {
+  const summary = postActivationFromRecords([
+    {
+      gradeResult: { passed: false },
+      trajectory: {
+        endReason: "completed",
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 1,
+          toolCallBreakdown: { skill: 1 },
+        },
+      },
+    },
+    {
+      gradeResult: { passed: true },
+      trajectory: {
+        endReason: "completed",
+        events: [
+          { type: "tool_call", data: { toolName: "skill" } },
+          { type: "skill_activation", data: { name: "example" } },
+          { type: "tool_call", data: { toolName: "view" } },
+        ],
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 3,
+          toolCallBreakdown: { skill: 1, view: 1, bash: 1 },
+        },
+      },
+    },
+    {
+      gradeResult: { passed: false },
+      trajectory: {
+        endReason: "completed",
+        events: [
+          { type: "tool_call", data: { toolName: "view" } },
+          { type: "tool_call", data: { toolName: "skill" } },
+          { type: "skill_activation", data: { name: "example" } },
+        ],
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 2,
+          toolCallBreakdown: { skill: 1, view: 1 },
+        },
+      },
+    },
+    {
+      gradeResult: { passed: true },
+      trajectory: {
+        endReason: "completed",
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 1,
+          toolCallBreakdown: { skill: 1 },
+        },
+      },
+    },
+    {
+      gradeResult: { passed: false },
+      trajectory: {
+        endReason: "agent_timeout",
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 1,
+          toolCallBreakdown: { skill: 1 },
+        },
+      },
+    },
+    {
+      gradeResult: { passed: true },
+      trajectory: {
+        endReason: "completed",
+        metrics: {
+          skillActivationCount: 0,
+          toolCallCount: 0,
+        },
+      },
+    },
+  ]);
+
+  assert.deepEqual(summary, {
+    activatedRuns: 5,
+    continuedRuns: 1,
+    activationOnlyCompletions: 3,
+    failedActivationOnlyCompletions: 2,
+    unclassifiedRuns: 1,
+  });
+});
+
+test("scenario results retain post-activation telemetry for isolated and plugin runs", () => {
+  const records = [
+    {
+      gradeResult: { passed: false, score: 0 },
+      trajectory: {
+        endReason: "completed",
+        events: [
+          { type: "skill.invoked", data: { name: IDENTITY.skill } },
+        ],
+        metrics: {
+          skillActivationCount: 1,
+          toolCallCount: 1,
+          toolCallBreakdown: { skill: 1 },
+        },
+      },
+    },
+  ];
+  const verdict = comparisonToVerdict(
+    reportFromScores([0]),
+    IDENTITY,
+    {
+      baselineByStim: new Map(),
+      skilledByStim: new Map([["Scenario 1", records]]),
+      pluginByStim: new Map([["Scenario 1", records]]),
+      hasPlugin: true,
+    },
+    new Set(),
+  );
+
+  assert.deepEqual(verdict.scenarios[0].skillActivationIsolated, {
+    activated: true,
+    activatedRuns: 1,
+    continuedRuns: 0,
+    activationOnlyCompletions: 1,
+    failedActivationOnlyCompletions: 1,
+    unclassifiedRuns: 0,
+  });
+  assert.deepEqual(
+    verdict.scenarios[0].skillActivationPlugin,
+    verdict.scenarios[0].skillActivationIsolated,
+  );
+});
+
+test("plugin activation ignores sibling skills when the target stays dormant", () => {
+  const targetRecord = {
+    gradeResult: { passed: true, score: 1 },
+    trajectory: {
+      endReason: "completed",
+      events: [
+        { type: "skill.invoked", data: { name: IDENTITY.skill } },
+      ],
+      metrics: {
+        skillActivationCount: 1,
+        toolCallCount: 1,
+        toolCallBreakdown: { skill: 1 },
+      },
+    },
+  };
+  const siblingRecord = {
+    gradeResult: { passed: true, score: 1 },
+    trajectory: {
+      endReason: "completed",
+      events: [
+        { type: "skill.invoked", data: { name: "sibling-skill" } },
+      ],
+      metrics: {
+        skillActivationCount: 1,
+        toolCallCount: 1,
+        toolCallBreakdown: { skill: 1 },
+      },
+    },
+  };
+  const verdict = comparisonToVerdict(
+    reportFromScores([0]),
+    IDENTITY,
+    {
+      baselineByStim: new Map(),
+      skilledByStim: new Map([["Scenario 1", [targetRecord]]]),
+      pluginByStim: new Map([["Scenario 1", [siblingRecord]]]),
+      hasPlugin: true,
+    },
+    new Set(),
+  );
+
+  assert.equal(verdict.scenarios[0].skillActivationIsolated.activated, true);
+  assert.equal(verdict.scenarios[0].skillActivationPlugin.activated, false);
+  assert.equal(verdict.scenarios[0].skillActivationPlugin.activatedRuns, undefined);
+});
+
+test("dormancy parser matches PyYAML Boolean false spellings exactly", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-yaml-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "  - name: LowerFalse",
+        "    expect_activation: false",
+        "  - name: TitleFalse",
+        "    expect_activation: False",
+        "  - name: UpperFalse",
+        "    expect_activation: FALSE",
+        "  - name: LowerNo",
+        "    expect_activation: no",
+        "  - name: TitleNo",
+        "    expect_activation: No",
+        "  - name: UpperNo",
+        "    expect_activation: NO",
+        "  - name: LowerOff",
+        "    expect_activation: off",
+        "  - name: TitleOff",
+        "    expect_activation: Off",
+        "  - name: UpperOff",
+        "    expect_activation: OFF",
+        "  - name: SingleLetter",
+        "    expect_activation: n",
+        "  - name: MixedCase",
+        "    expect_activation: fAlse",
+        "  - name: Commented",
+        "    expect_activation: false # dormancy contract",
+        "  - name: CommentWithoutSeparator",
+        "    expect_activation: false#not-a-comment",
+        "  - name: Prefix",
+        "    expect_activation: off-target",
+        "  - name: Quoted",
+        '    expect_activation: "false"',
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      [
+        "LowerFalse",
+        "TitleFalse",
+        "UpperFalse",
+        "LowerNo",
+        "TitleNo",
+        "UpperNo",
+        "LowerOff",
+        "TitleOff",
+        "UpperOff",
+        "Commented",
+      ],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser reads a zero-indent stimuli sequence", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-zero-indent-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "- name: Dormant",
+        "  expect_activation: false",
+        "- name: Active",
+        "  expect_activation: true",
+        "defaults:",
+        "  runs: 1",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual([...readNonActivationStimuli("eval.yaml", root)], ["Dormant"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser reads flow-mapping stimuli", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-flow-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "  - {name: Dormant, expect_activation: false}",
+        "  - {expect_activation: false, name: 'Dormant, quoted'}",
+        "  - {name: Active, expect_activation: true}",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      ["Dormant", "Dormant, quoted"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a retry fills only errored slots and freezes successful judgments", () => {
   const primary = reportFromRepeatedScores([null, 0.4, 0.4, 0.4, 0.4]);
@@ -682,6 +1027,203 @@ test("scenario evidence collapses repeated runs to one authoritative vote", () =
   assert.equal(verdict.passed, false);
 });
 
+test("dormancy scenarios are retained but excluded from preference inference", () => {
+  const report = reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, -0.4]);
+  for (const trial of report.stimuli.flatMap((stimulus) => stimulus.trials)) {
+    trial.baselinePassed = true;
+    trial.treatmentPassed = true;
+  }
+
+  const verdict = comparisonToVerdict(
+    report,
+    IDENTITY,
+    {
+      ...EMPTY_ROLES,
+      skilledByStim: new Map([
+        ["Scenario 6", [{ trajectory: { events: [], metrics: {} } }]],
+      ]),
+    },
+    new Set(["Scenario 6"]),
+  );
+
+  assert.equal(verdict.passed, true);
+  assert.equal(verdict.state, VERDICT_STATES.VALID_PASS);
+  assert.equal(verdict.stimulusVoteCount, 5);
+  assert.equal(verdict.signTest.wins, 5);
+  assert.equal(verdict.signTest.losses, 0);
+  assert.equal(verdict.scenarioEvidence.count, 5);
+  assert.equal(verdict.excludedScenarioEvidence.count, 1);
+  assert.equal(verdict.excludedScenarioEvidence.losses, 1);
+  assert.equal(verdict.excludedScenarioEvidence.gateEligible, false);
+  assert.equal(verdict.comparisonTrialEvidence.count, 6, "all-run reliability evidence is retained");
+  assert.equal(verdict.completionTransitions.bothPassed, 6, "completion accounting retains dormancy runs");
+  assert.equal(verdict.activationContract.count, 1);
+  assert.equal(verdict.activationContract.passed, true);
+  assert.equal(verdict.scenarios[5].preferenceGateEligible, false);
+  assert.equal(
+    verdict.scenarios[5].preferenceGateExclusionReason,
+    "activation_contract_only",
+  );
+  assert.deepEqual(verdict.activationContract.unmatchedDormancyStimuli, []);
+});
+
+test("missing dormancy stimuli fail the activation contract", () => {
+  const verdict = comparisonToVerdict(
+    reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4]),
+    IDENTITY,
+    EMPTY_ROLES,
+    new Set(["Renamed scenario"]),
+  );
+
+  assert.equal(verdict.passed, false);
+  assert.equal(verdict.activationContract.passed, false);
+  assert.equal(verdict.activationContract.count, 1);
+  assert.equal(verdict.activationContract.satisfied, 0);
+  assert.equal(verdict.activationContract.violated, 1);
+  assert.equal(verdict.activationContract.failures.length, 1);
+  assert.equal(
+    verdict.activationContract.failures[0].scenarioName,
+    "Renamed scenario",
+  );
+  assert.equal(verdict.activationContract.failures[0].expected, "dormant");
+  assert.equal(verdict.activationContract.failures[0].observed, "missing");
+  assert.equal(
+    verdict.scenarios.find((scenario) => scenario.scenarioName === "Renamed scenario")
+      ?.observedInAnyRole,
+    false,
+  );
+  assert.deepEqual(
+    verdict.activationContract.unmatchedDormancyStimuli,
+    ["Renamed scenario"],
+  );
+});
+
+test("dormancy requires isolated target evidence even when other roles are observed", () => {
+  const report = reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0]);
+  const observedRun = [{ trajectory: { events: [], metrics: {} } }];
+  const roles = {
+    ...EMPTY_ROLES,
+    baselineByStim: new Map([["Scenario 6", observedRun]]),
+    pluginByStim: new Map([["Scenario 6", observedRun]]),
+  };
+
+  const verdict = comparisonToVerdict(
+    report,
+    IDENTITY,
+    roles,
+    new Set(["Scenario 6"]),
+  );
+
+  assert.equal(verdict.scenarios[5].observedInAnyRole, true);
+  assert.equal(verdict.activationContract.passed, false);
+  assert.deepEqual(verdict.activationContract.failures, [
+    {
+      scenarioName: "Scenario 6",
+      expected: "dormant",
+      observed: "missing",
+      satisfied: false,
+    },
+  ]);
+  assert.equal(verdict.stateReason.code, "activation_contract_failed");
+});
+
+test("unexpected dormancy activation blocks an otherwise passing preference verdict", () => {
+  const report = reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0]);
+  const roles = {
+    ...EMPTY_ROLES,
+    skilledByStim: new Map([
+      [
+        "Scenario 6",
+        [{
+          trajectory: {
+            events: [
+              { type: "skill.invoked", data: { name: IDENTITY.skill } },
+            ],
+            metrics: { skillActivationCount: 1 },
+          },
+        }],
+      ],
+    ]),
+  };
+
+  const verdict = comparisonToVerdict(
+    report,
+    IDENTITY,
+    roles,
+    new Set(["Scenario 6"]),
+  );
+
+  assert.equal(verdict.signTest.wins, 5);
+  assert.equal(verdict.passed, false);
+  assert.equal(verdict.state, VERDICT_STATES.VALID_NO_CHANGE);
+  assert.equal(verdict.stateReason.code, "activation_contract_failed");
+  assert.equal(verdict.activationContract.passed, false);
+  assert.deepEqual(verdict.activationContract.failures, [
+    {
+      scenarioName: "Scenario 6",
+      expected: "dormant",
+      observed: "activated",
+      satisfied: false,
+    },
+  ]);
+});
+
+test("activation contract failure remains definitive when preference is underpowered", () => {
+  const report = reportFromScores([0.4, 0.4, 0.4, 0.4, 0]);
+  const roles = {
+    ...EMPTY_ROLES,
+    skilledByStim: new Map([
+      [
+        "Scenario 5",
+        [{
+          trajectory: {
+            events: [
+              { type: "skill.invoked", data: { name: IDENTITY.skill } },
+            ],
+            metrics: { skillActivationCount: 1 },
+          },
+        }],
+      ],
+    ]),
+  };
+
+  const verdict = comparisonToVerdict(
+    report,
+    IDENTITY,
+    roles,
+    new Set(["Scenario 5"]),
+  );
+
+  assert.equal(verdict.underpowered, true, "preference power remains visible");
+  assert.equal(verdict.passed, false);
+  assert.equal(verdict.state, VERDICT_STATES.VALID_NO_CHANGE);
+  assert.equal(verdict.stateReason.code, "activation_contract_failed");
+});
+
+test("comparison errors on dormancy scenarios still fail closed", () => {
+  const report = reportFromStimulusRuns([[0.4], [0.4], [0.4], [0.4], [0.4], [null]]);
+  report.stimuli[5].trials[0] = {
+    trialIndex: 0,
+    score: 0,
+    winner: "tie",
+    errored: true,
+    evidence: "Comparison judge failed",
+  };
+  report.summary.erroredCount = 1;
+
+  const verdict = comparisonToVerdict(
+    report,
+    IDENTITY,
+    EMPTY_ROLES,
+    new Set(["Scenario 6"]),
+  );
+
+  assert.equal(verdict.conclusive, false);
+  assert.equal(verdict.passed, false);
+  assert.equal(verdict.state, VERDICT_STATES.INVALID_INCONCLUSIVE);
+  assert.equal(verdict.excludedScenarioEvidence.unscoredCount, 1);
+});
+
 test("repeated runs cannot manufacture significance from four of five stimuli", () => {
   const report = reportFromStimulusRuns([
     [0.4, 0.4, 0.4],
@@ -796,7 +1338,8 @@ test("a tie-starved record says no record could have passed, not that none did",
   assert.equal(v.signTest.discordant, 1);
   assert.equal(v.passed, false);
   assert.equal(v.regressed, false);
-  assert.match(v.reason, /4 of 5 stimulus vote\(s\) tied, leaving only 1 discordant stimulus vote\(s\)/);
+  assert.equal(v.noChangeDiagnosis, "positive_tie_limited");
+  assert.match(v.reason, /4 of 5 preference-eligible stimulus vote\(s\) tied, leaving only 1 discordant preference vote\(s\)/);
   assert.match(v.reason, /no record could have passed here — this is not a measured null/);
   assert.match(v.reason, /inert/);
 
@@ -805,6 +1348,7 @@ test("a tie-starved record says no record could have passed, not that none did",
   const four = gate([0.4, 0.4, 0.4, 0.4, 0]);
   assert.equal(four.signTest.discordant, 4);
   assert.equal(four.passed, false);
+  assert.equal(four.noChangeDiagnosis, "positive_tie_limited");
   assert.match(four.reason, /no record could have passed here/);
 
   // Five discordant stimulus votes is where the test becomes winnable, so a record that
@@ -812,6 +1356,7 @@ test("a tie-starved record says no record could have passed, not that none did",
   const winnable = gate([0.4, 0.4, 0.4, 0.4, -0.4]);
   assert.equal(winnable.signTest.discordant, 5);
   assert.equal(winnable.passed, false);
+  assert.equal(winnable.noChangeDiagnosis, "positive_unproven");
   assert.match(winnable.reason, /not credible \(sign test p=/);
   assert.doesNotMatch(winnable.reason, /no record could have passed/);
 });
@@ -837,7 +1382,12 @@ test("the gate ignores the statistics vally reports", () => {
 });
 
 test("losses sink a verdict, and a clean sweep of them is a credible regression", () => {
-  assert.equal(gate([0.4, 0.4, 0.4, -0.4, -0.4, -0.4]).passed, false, "even split");
+  const even = gate([0.4, 0.4, 0.4, -0.4, -0.4, -0.4]);
+  assert.equal(even.passed, false, "even split");
+  assert.equal(even.noChangeDiagnosis, "mixed");
+  const baselineLean = gate([0.4, -0.4, -0.4, -0.4, -0.4]);
+  assert.equal(baselineLean.regressed, false);
+  assert.equal(baselineLean.noChangeDiagnosis, "negative_unproven");
   const swept = gate([-0.4, -0.4, -0.4, -0.4, -0.4]);
   assert.equal(swept.passed, false);
   assert.equal(swept.regressed, true);
@@ -958,6 +1508,11 @@ test("the practical net-win floor rejects sparse wins among many ties", () => {
   assert.equal(sparse.passed, false);
   assert.equal(sparse.state, VERDICT_STATES.VALID_NO_CHANGE);
   assert.equal(sparse.stateReason.code, "practical_effect_below_floor");
+  assert.equal(sparse.noChangeDiagnosis, "positive_sparse");
+
+  const sparseLoss = gate([...Array(95).fill(0), ...Array(5).fill(-0.4)]);
+  assert.equal(sparseLoss.stateReason.code, "practical_effect_below_floor");
+  assert.equal(sparseLoss.noChangeDiagnosis, "negative_sparse");
 
   const boundary = gate([...Array(5).fill(0.4), ...Array(20).fill(0)]);
   assert.equal(boundary.netWin, MIN_PRACTICAL_NET_WIN);
@@ -1010,4 +1565,799 @@ test("splitVallyCommand keeps quoted paths whole and passes odd input through", 
     prefix: ["/home/o'brien/vally.mjs", "--flag"],
   });
   assert.deepEqual(splitVallyCommand(""), { bin: "", prefix: [] });
+});
+
+// ---------------------------------------------------------------------------
+// Targeted comparison-slot recovery
+// ---------------------------------------------------------------------------
+
+const JUDGE_TIMEOUT_EVIDENCE =
+  "Comparison judge failed: Timeout after 120000ms waiting for session.idle";
+
+function executorRecord(variant, stimulusName, trialIndex) {
+  return {
+    type: "trial-result",
+    status: "success",
+    variant,
+    stimulus: stimulusName,
+    shardKey: `${evalFile}::${variant}::gpt-5.6-luna::${stimulusName}::trial-${trialIndex}`,
+    experiment: { evalFile },
+    trajectory: { events: [] },
+  };
+}
+
+/** Preserved executor trajectories for every trial slot the report describes. */
+function executorRecordsFor(report, variant) {
+  return (report.stimuli ?? []).flatMap((stimulus) =>
+    (stimulus.trials ?? []).map((trial) =>
+      executorRecord(variant, stimulus.stimulusName, trial.trialIndex),
+    ),
+  );
+}
+
+/** Mark one slot as an errored judge slot that already survived a slice retry. */
+function strandSlot(report, stimulusIndex, trialIndex, error) {
+  const trial = report.stimuli[stimulusIndex].trials[trialIndex];
+  trial.score = 0;
+  trial.winner = "tie";
+  trial.errored = true;
+  trial.evidence = JUDGE_TIMEOUT_EVIDENCE;
+  trial.comparisonAttempt = 2;
+  if (error) trial.retryError = error;
+  report.summary.trialCount--;
+  report.summary.erroredCount++;
+  report.retrySummary = {
+    attempts: 2,
+    retriedSlots: 1,
+    recoveredSlots: 0,
+    frozenSuccesses: report.summary.trialCount,
+    recoveredErrors: [],
+    persistentErrors: [
+      {
+        stimulusName: report.stimuli[stimulusIndex].stimulusName,
+        trialIndex: trial.trialIndex,
+        attempts: 2,
+        attemptHistory: [
+          { attempt: 1, code: "judge_session_idle_timeout", kind: "transient" },
+          { attempt: 2, code: "judge_session_idle_timeout", kind: "transient" },
+        ],
+      },
+    ],
+  };
+  return report;
+}
+
+function withTargetedRecovery(report, compare, overrides = {}) {
+  const workDir = mkdtempSync(join(tmpdir(), "vally-targeted-"));
+  try {
+    return recoverTransientComparisonSlots(report, {
+      baselineRecords: executorRecordsFor(report, "baseline"),
+      skilledRecords: executorRecordsFor(report, "skilled"),
+      workDir,
+      filePrefix: "dotnet-test__detect-static-dependencies",
+      compare,
+      ...overrides,
+    });
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+test("a transient comparison-judge timeout is recovered from preserved trajectories", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const slices = [];
+
+  const recovered = withTargetedRecovery(primary, (baselineSlice, skilledSlice) => {
+    slices.push([readFileSync(baselineSlice, "utf8"), readFileSync(skilledSlice, "utf8")]);
+    // Vally renumbers a narrowed slice from zero; the adapter must restore the
+    // original slot identity rather than trusting the retry's trialIndex.
+    return {
+      summary: { trialCount: 1, erroredCount: 0 },
+      stimuli: [
+        {
+          stimulusName: "Scenario 1",
+          trials: [{ trialIndex: 0, score: 1, winner: "treatment", errored: false }],
+        },
+      ],
+    };
+  });
+
+  assert.equal(slices.length, 1);
+  for (const [baselineSlice, skilledSlice] of slices) {
+    assert.equal(baselineSlice.trim().split("\n").length, 1);
+    assert.equal(skilledSlice.trim().split("\n").length, 1);
+    assert.match(baselineSlice, /::trial-2/);
+    assert.match(skilledSlice, /::trial-2/);
+  }
+
+  const restored = recovered.stimuli[0].trials[2];
+  assert.equal(restored.errored, false);
+  assert.equal(restored.trialIndex, 2);
+  assert.equal(restored.comparisonAttempt, 3);
+  assert.equal(restored.targetedRecovery, true);
+  assert.equal(restored.recoveredFrom.code, "judge_session_idle_timeout");
+  assert.equal(recovered.summary.erroredCount, 0);
+  assert.equal(recovered.summary.trialCount, 3);
+  assert.equal(recovered.retrySummary.attempts, 3);
+  assert.equal(recovered.retrySummary.recoveredSlots, 1);
+  assert.deepEqual(recovered.retrySummary.persistentErrors, []);
+  assert.equal(recovered.retrySummary.targetedRecovery.recoveredSlotCount, 1);
+  assert.equal(recovered.retrySummary.targetedRecovery.unresolvedSlotCount, 0);
+
+  // Successful first-attempt judgments are never replaced by the retry.
+  assert.deepEqual(
+    recovered.stimuli[0].trials.slice(0, 2).map(trialDirection),
+    [1, 1],
+  );
+});
+
+test("a recovered comparison slot produces a conclusive verdict", () => {
+  const primary = strandSlot(reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0.4]), 5, 0);
+  assert.equal(
+    comparisonToVerdict(primary, IDENTITY, EMPTY_ROLES, new Set()).state,
+    VERDICT_STATES.INVALID_INCONCLUSIVE,
+  );
+
+  const recovered = withTargetedRecovery(primary, () => ({
+    stimuli: [
+      {
+        stimulusName: "Scenario 6",
+        trials: [{ trialIndex: 0, score: 1, winner: "treatment", errored: false }],
+      },
+    ],
+  }));
+  const verdict = comparisonToVerdict(recovered, IDENTITY, EMPTY_ROLES, new Set());
+
+  assert.equal(verdict.conclusive, true);
+  assert.equal(verdict.state, VERDICT_STATES.VALID_PASS);
+});
+
+test("a persistent comparison timeout stays measurement-invalid", () => {
+  const primary = strandSlot(reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0.4]), 5, 0);
+  const recovered = withTargetedRecovery(primary, () => ({
+    stimuli: [
+      {
+        stimulusName: "Scenario 6",
+        trials: [
+          {
+            trialIndex: 0,
+            score: 0,
+            winner: "tie",
+            errored: true,
+            evidence: JUDGE_TIMEOUT_EVIDENCE,
+          },
+        ],
+      },
+    ],
+  }));
+
+  assert.equal(recovered.summary.erroredCount, 1);
+  assert.equal(recovered.retrySummary.targetedRecovery.recoveredSlotCount, 0);
+  assert.equal(recovered.retrySummary.targetedRecovery.unresolvedSlotCount, 1);
+  assert.equal(
+    recovered.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory[1].code,
+    "judge_session_idle_timeout",
+  );
+
+  const verdict = comparisonToVerdict(recovered, IDENTITY, EMPTY_ROLES, new Set());
+  assert.equal(verdict.conclusive, false);
+  assert.equal(verdict.state, VERDICT_STATES.INVALID_INCONCLUSIVE);
+  assert.equal(verdict.stateReason.code, "comparison_judge_error");
+});
+
+test("a failed targeted retry invocation leaves the slot errored", () => {
+  const primary = strandSlot(reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0.4]), 5, 0);
+  const recovered = withTargetedRecovery(primary, () => {
+    throw new Error("vally compare exited 1");
+  });
+
+  assert.equal(recovered.summary.erroredCount, 1);
+  assert.equal(
+    recovered.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1).code,
+    "targeted_retry_invocation_failed",
+  );
+});
+
+test("a targeted retry report with extra evidence is rejected", () => {
+  const primary = strandSlot(
+    reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0.4]),
+    5,
+    0,
+  );
+
+  const recovered = withTargetedRecovery(primary, () => ({
+    stimuli: [
+      {
+        stimulusName: "Scenario 6",
+        trials: [
+          { trialIndex: 0, score: 1, winner: "treatment", errored: false },
+        ],
+      },
+      {
+        stimulusName: "Unexpected scenario",
+        trials: [
+          { trialIndex: 0, score: 0, winner: "tie", errored: false },
+        ],
+      },
+    ],
+  }));
+
+  assert.equal(recovered.summary.erroredCount, 1);
+  assert.equal(
+    recovered.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1).code,
+    "targeted_retry_result_ambiguous",
+  );
+});
+
+test("a targeted retry trial without judgment fields is rejected", () => {
+  const primary = strandSlot(
+    reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0.4]),
+    5,
+    0,
+  );
+
+  const recovered = withTargetedRecovery(primary, () => ({
+    stimuli: [
+      {
+        stimulusName: "Scenario 6",
+        trials: [{ trialIndex: 0, errored: false }],
+      },
+    ],
+  }));
+
+  assert.equal(recovered.summary.erroredCount, 1);
+  assert.equal(
+    recovered.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1).code,
+    "targeted_retry_result_invalid",
+  );
+});
+
+test("targeted recovery never re-judges a permanent judge failure", () => {
+  const primary = strandSlot(reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0.4]), 5, 0, {
+    phase: "comparison_judge",
+    kind: "permanent",
+    code: "judge_organization_disabled",
+    message: "disabled by your organization",
+  });
+  let calls = 0;
+  const recovered = withTargetedRecovery(primary, () => {
+    calls++;
+    return null;
+  });
+
+  assert.equal(calls, 0);
+  assert.equal(recovered.summary.erroredCount, 1);
+  assert.equal(recovered.retrySummary.targetedRecovery, undefined);
+});
+
+test("targeted recovery never re-judges semantic or activation outcomes", () => {
+  // A loss, a tie and a dormancy stimulus are all decided judgments, not judge
+  // faults, so no slot is eligible and the report must pass through untouched.
+  const decided = reportFromScores([-1, 0, -0.4, 0.4]);
+  let calls = 0;
+  const result = withTargetedRecovery(decided, () => {
+    calls++;
+    return null;
+  });
+
+  assert.equal(calls, 0);
+  assert.deepEqual(result, decided);
+  const roles = {
+    ...EMPTY_ROLES,
+    skilledByStim: new Map([
+      ["Scenario 2", [{ trajectory: { events: [], metrics: {} } }]],
+    ]),
+  };
+  assert.equal(
+    comparisonToVerdict(result, IDENTITY, roles, new Set(["Scenario 2"])).state,
+    VERDICT_STATES.INVALID_INCONCLUSIVE,
+  );
+});
+
+test("too many stranded comparison slots are treated as a systemic failure", () => {
+  const primary = reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0.4]);
+  for (let index = 0; index < MAX_TARGETED_COMPARISON_SLOTS + 1; index++) {
+    strandSlot(primary, index, 0);
+  }
+  let calls = 0;
+  const result = withTargetedRecovery(primary, () => {
+    calls++;
+    return null;
+  });
+
+  assert.equal(calls, 0);
+  assert.equal(result.summary.erroredCount, MAX_TARGETED_COMPARISON_SLOTS + 1);
+  assert.equal(
+    result.retrySummary.targetedRecovery.unresolvedSlotCount,
+    MAX_TARGETED_COMPARISON_SLOTS + 1,
+  );
+  assert.match(result.retrySummary.targetedRecovery.skippedReason, /systemic judge failure/);
+});
+
+test("a missing executor trial fails the comparison identity check", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const workDir = mkdtempSync(join(tmpdir(), "vally-targeted-missing-"));
+  let calls = 0;
+  try {
+    const result = recoverTransientComparisonSlots(primary, {
+      // No baseline trajectory survives for the stranded slot, so there is
+      // nothing to re-judge. That is a different fault from two trajectories
+      // claiming the slot, and it needs its own code to be investigable.
+      baselineRecords: executorRecordsFor(primary, "baseline").filter(
+        (record) => !record.shardKey.endsWith("::trial-2"),
+      ),
+      skilledRecords: executorRecordsFor(primary, "skilled"),
+      workDir,
+      filePrefix: "missing",
+      compare: () => {
+        calls++;
+        return null;
+      },
+    });
+
+    assert.equal(calls, 0);
+    assert.equal(result.summary.erroredCount, 1);
+    const failure = result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1);
+    assert.equal(failure.code, "targeted_slot_trial_identity_mismatch");
+    assert.match(
+      failure.message,
+      /comparison=\[0, 1, 2\], baseline=\[0, 1\] \(0 invalid, 0 duplicate\), skilled=\[0, 1, 2\] \(0 invalid, 0 duplicate\)/,
+    );
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test("a slot trajectory is matched through the canonical stimulus accessor", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const workDir = mkdtempSync(join(tmpdir(), "vally-targeted-canonical-"));
+  // Vally records do not all carry a top-level `stimulus`; some expose it only
+  // under `gradeResult.stimulusName`. The slot lookup must read both the same
+  // way the rest of the adapter does, or a recoverable slot looks like missing
+  // evidence.
+  const viaGradeResult = (variant) =>
+    executorRecordsFor(primary, variant).map(({ stimulus, ...record }) => ({
+      ...record,
+      gradeResult: { stimulusName: stimulus },
+    }));
+  try {
+    const result = recoverTransientComparisonSlots(primary, {
+      baselineRecords: viaGradeResult("baseline"),
+      skilledRecords: viaGradeResult("skilled"),
+      workDir,
+      filePrefix: "canonical",
+      compare: () => reportFromScores([0.62]),
+    });
+
+    assert.equal(result.summary.erroredCount, 0);
+    assert.equal(result.retrySummary.targetedRecovery.recoveredSlotCount, 1);
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test("a null trajectory entry never crashes the recovery pass", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const workDir = mkdtempSync(join(tmpdir(), "vally-targeted-null-"));
+  // A truncated or partly written trajectory file can yield a null entry. The
+  // lookup must step over it: a throw here would abandon every other slot and
+  // turn one bad line into a whole-leg failure.
+  try {
+    const result = recoverTransientComparisonSlots(primary, {
+      baselineRecords: [null, ...executorRecordsFor(primary, "baseline")],
+      skilledRecords: [...executorRecordsFor(primary, "skilled"), null],
+      workDir,
+      filePrefix: "nullsafe",
+      compare: () => reportFromScores([0.62]),
+    });
+
+    assert.equal(result.summary.erroredCount, 0);
+    assert.equal(result.retrySummary.targetedRecovery.recoveredSlotCount, 1);
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test("an ambiguous slot-to-trajectory mapping is never re-judged", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const workDir = mkdtempSync(join(tmpdir(), "vally-targeted-dup-"));
+  let calls = 0;
+  try {
+    const baselineRecords = executorRecordsFor(primary, "baseline");
+    const result = recoverTransientComparisonSlots(primary, {
+      // Two baseline trajectories claim the same slot: re-judging either one
+      // would silently pick a trajectory the first attempt may not have used.
+      baselineRecords: [...baselineRecords, executorRecord("baseline", "Scenario 1", 2)],
+      skilledRecords: executorRecordsFor(primary, "skilled"),
+      workDir,
+      filePrefix: "ambiguous",
+      compare: () => {
+        calls++;
+        return null;
+      },
+    });
+
+    assert.equal(calls, 0);
+    assert.equal(result.summary.erroredCount, 1);
+    assert.equal(
+      result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1).code,
+      "targeted_slot_trial_identity_mismatch",
+    );
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test("a duplicate executor identity outside the stranded slot blocks recovery", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const baselineRecords = executorRecordsFor(primary, "baseline");
+  baselineRecords.push({
+    ...baselineRecords.find((record) => record.shardKey.endsWith("::trial-0")),
+  });
+  let calls = 0;
+
+  const result = withTargetedRecovery(
+    primary,
+    () => {
+      calls++;
+      return null;
+    },
+    { baselineRecords },
+  );
+
+  assert.equal(calls, 0);
+  const failure =
+    result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1);
+  assert.equal(failure.code, "targeted_slot_trial_identity_mismatch");
+  assert.match(failure.message, /baseline=\[0, 1, 2\] \(0 invalid, 1 duplicate\)/);
+});
+
+test("an errored executor trajectory is never re-judged", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const baselineRecords = executorRecordsFor(primary, "baseline");
+  baselineRecords.find((record) => record.shardKey.endsWith("::trial-2")).status = "error";
+  let calls = 0;
+
+  const result = withTargetedRecovery(
+    primary,
+    () => {
+      calls++;
+      return null;
+    },
+    { baselineRecords },
+  );
+
+  assert.equal(calls, 0);
+  const failure =
+    result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1);
+  assert.equal(
+    failure.code,
+    "targeted_slot_trajectory_incomplete",
+  );
+  assert.match(
+    failure.message,
+    /baseline type=trial-result status=error trajectory=present/,
+  );
+});
+
+test("a successful executor record without a trajectory is never re-judged", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const baselineRecords = executorRecordsFor(primary, "baseline");
+  baselineRecords.find(
+    (record) => record.shardKey.endsWith("::trial-2"),
+  ).trajectory = null;
+  let calls = 0;
+
+  const result = withTargetedRecovery(
+    primary,
+    () => {
+      calls++;
+      return null;
+    },
+    { baselineRecords },
+  );
+
+  assert.equal(calls, 0);
+  const failure =
+    result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1);
+  assert.equal(
+    failure.code,
+    "targeted_slot_trajectory_incomplete",
+  );
+  assert.match(
+    failure.message,
+    /baseline type=trial-result status=success trajectory=missing/,
+  );
+});
+
+test("a successful trajectory paired with an errored duplicate is ambiguous", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const baselineRecords = executorRecordsFor(primary, "baseline");
+  const original = baselineRecords.find(
+    (record) => record.shardKey.endsWith("::trial-2"),
+  );
+  baselineRecords.push({ ...original, status: "error" });
+  let calls = 0;
+
+  const result = withTargetedRecovery(
+    primary,
+    () => {
+      calls++;
+      return null;
+    },
+    { baselineRecords },
+  );
+
+  assert.equal(calls, 0);
+  assert.equal(
+    result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1).code,
+    "targeted_slot_trial_identity_mismatch",
+  );
+});
+
+test("executor and comparison trial-index set mismatch fails closed", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 1);
+  const baselineRecords = executorRecordsFor(primary, "baseline").map((record) => {
+    const trialIndex = Number(/::trial-(\d+)$/.exec(record.shardKey)[1]);
+    return {
+      ...record,
+      shardKey: record.shardKey.replace(
+        /::trial-\d+$/,
+        `::trial-${trialIndex + 1}`,
+      ),
+    };
+  });
+
+  let calls = 0;
+
+  const result = withTargetedRecovery(
+    primary,
+    () => {
+      calls++;
+      return null;
+    },
+    { baselineRecords },
+  );
+
+  assert.equal(calls, 0);
+  assert.equal(result.summary.erroredCount, 1);
+  const failure =
+    result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1);
+  assert.equal(failure.code, "targeted_slot_trial_identity_mismatch");
+  assert.match(
+    failure.message,
+    /comparison=\[0, 1, 2\], baseline=\[1, 2, 3\] \(0 invalid, 0 duplicate\), skilled=\[0, 1, 2\] \(0 invalid, 0 duplicate\)/,
+  );
+});
+
+test("executor records with invalid trial identities fail closed", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 1);
+  const baselineRecords = executorRecordsFor(primary, "baseline");
+  baselineRecords.push({
+    ...baselineRecords[0],
+    shardKey: "malformed-without-trial-index",
+  });
+  let calls = 0;
+
+  const result = withTargetedRecovery(
+    primary,
+    () => {
+      calls++;
+      return null;
+    },
+    { baselineRecords },
+  );
+
+  assert.equal(calls, 0);
+  const failure =
+    result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1);
+  assert.equal(failure.code, "targeted_slot_trial_identity_mismatch");
+  assert.match(failure.message, /baseline=\[0, 1, 2\] \(1 invalid, 0 duplicate\)/);
+});
+
+test("targeted recovery uses the canonical stimulus identity", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const baselineRecords = executorRecordsFor(primary, "baseline");
+  const skilledRecords = executorRecordsFor(primary, "skilled");
+  for (const record of [...baselineRecords, ...skilledRecords]) {
+    record.gradeResult = { stimulusName: record.stimulus };
+    delete record.stimulus;
+  }
+  let calls = 0;
+
+  const recovered = withTargetedRecovery(primary, () => {
+    calls++;
+    return {
+      stimuli: [{
+        stimulusName: "Scenario 1",
+        trials: [{ trialIndex: 0, score: 1, winner: "treatment", errored: false }],
+      }],
+    };
+  }, { baselineRecords, skilledRecords });
+
+  assert.equal(calls, 1);
+  assert.equal(recovered.summary.erroredCount, 0);
+});
+
+test("targeted recovery accepts source-file variant identity when records omit variant", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const baselineRecords = executorRecordsFor(primary, "baseline");
+  const skilledRecords = executorRecordsFor(primary, "skilled");
+  for (const record of [...baselineRecords, ...skilledRecords]) {
+    delete record.variant;
+  }
+  let calls = 0;
+
+  const recovered = withTargetedRecovery(primary, () => {
+    calls++;
+    return {
+      stimuli: [{
+        stimulusName: "Scenario 1",
+        trials: [{ trialIndex: 0, score: 1, winner: "treatment", errored: false }],
+      }],
+    };
+  }, { baselineRecords, skilledRecords });
+
+  assert.equal(calls, 1);
+  assert.equal(recovered.summary.erroredCount, 0);
+});
+
+test("an empty executor arm fails the comparison identity check", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const workDir = mkdtempSync(join(tmpdir(), "vally-targeted-missing-"));
+  let calls = 0;
+  try {
+    const result = recoverTransientComparisonSlots(primary, {
+      baselineRecords: [],
+      skilledRecords: executorRecordsFor(primary, "skilled"),
+      workDir,
+      filePrefix: "missing",
+      compare: () => {
+        calls++;
+        return null;
+      },
+    });
+
+    assert.equal(calls, 0);
+    assert.equal(result.summary.erroredCount, 1);
+    assert.equal(
+      result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1).code,
+      "targeted_slot_trial_identity_mismatch",
+    );
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test("a targeted variant mismatch is never re-judged", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const skilledRecords = executorRecordsFor(primary, "skilled");
+  skilledRecords.find((record) => record.shardKey.endsWith("::trial-2")).variant = "baseline";
+  const workDir = mkdtempSync(join(tmpdir(), "vally-targeted-variant-"));
+  let calls = 0;
+  try {
+    const result = recoverTransientComparisonSlots(primary, {
+      baselineRecords: executorRecordsFor(primary, "baseline"),
+      skilledRecords,
+      workDir,
+      filePrefix: "variant",
+      compare: () => {
+        calls++;
+        return null;
+      },
+    });
+
+    assert.equal(calls, 0);
+    assert.equal(
+      result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1).code,
+      "targeted_slot_variant_mismatch",
+    );
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test("a sibling source-file variant mismatch blocks targeted recovery", () => {
+  const primary = strandSlot(reportFromRepeatedScores([0.4, 0.4, 0.4]), 0, 2);
+  const baselineRecords = executorRecordsFor(primary, "baseline");
+  const skilledRecords = executorRecordsFor(primary, "skilled");
+  baselineRecords.find((record) => record.shardKey.endsWith("::trial-0")).variant =
+    "skilled";
+  skilledRecords.find((record) => record.shardKey.endsWith("::trial-1")).variant =
+    "baseline";
+  const workDir = mkdtempSync(join(tmpdir(), "vally-targeted-sibling-variant-"));
+  let calls = 0;
+  try {
+    const result = recoverTransientComparisonSlots(primary, {
+      baselineRecords,
+      skilledRecords,
+      workDir,
+      filePrefix: "sibling-variant",
+      compare: () => {
+        calls++;
+        return null;
+      },
+    });
+
+    assert.equal(calls, 0);
+    const failure =
+      result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1);
+    assert.equal(failure.code, "targeted_slot_variant_mismatch");
+    assert.match(failure.message, /baseline expected "baseline" \[trial 0="skilled"\]/);
+    assert.match(failure.message, /skilled expected "skilled" \[trial 1="baseline"\]/);
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test("targeted recovery uses complete preserved evidence after the coarse retry crashes", () => {
+  const retryCrash = {
+    phase: "comparison_judge",
+    kind: "unknown",
+    code: "comparison_retry_invocation_failed",
+    message: "vally compare process crashed",
+  };
+  const primary = strandSlot(
+    reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0.4]),
+    5,
+    0,
+    retryCrash,
+  );
+  primary.retrySummary.persistentErrors[0].attemptHistory[1] = {
+    attempt: 2,
+    ...retryCrash,
+  };
+  let calls = 0;
+
+  const recovered = withTargetedRecovery(primary, () => {
+    calls++;
+    return {
+      stimuli: [{
+        stimulusName: "Scenario 6",
+        trials: [{ trialIndex: 0, score: 1, winner: "treatment", errored: false }],
+      }],
+    };
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(recovered.summary.erroredCount, 0);
+  assert.equal(recovered.retrySummary.targetedRecovery.recoveredSlotCount, 1);
+});
+
+test("targeted recovery after a coarse retry crash requires matching source identity", () => {
+  const retryCrash = {
+    phase: "comparison_judge",
+    kind: "unknown",
+    code: "comparison_retry_invocation_failed",
+    message: "vally compare process crashed",
+  };
+  const primary = strandSlot(
+    reportFromScores([0.4, 0.4, 0.4, 0.4, 0.4, 0.4]),
+    5,
+    0,
+    retryCrash,
+  );
+  const workDir = mkdtempSync(join(tmpdir(), "vally-targeted-crash-missing-"));
+  let calls = 0;
+  try {
+    const result = recoverTransientComparisonSlots(primary, {
+      baselineRecords: [],
+      skilledRecords: executorRecordsFor(primary, "skilled"),
+      workDir,
+      filePrefix: "crash-missing",
+      compare: () => {
+        calls++;
+        return null;
+      },
+    });
+
+    assert.equal(calls, 0);
+    assert.equal(result.summary.erroredCount, 1);
+    assert.equal(
+      result.retrySummary.targetedRecovery.unresolvedSlots[0].attemptHistory.at(-1).code,
+      "targeted_slot_trial_identity_mismatch",
+    );
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
 });

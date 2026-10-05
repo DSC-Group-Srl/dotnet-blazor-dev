@@ -1,14 +1,17 @@
 ---
 name: code-testing-agent
 description: >-
-  Generate or add unit tests for existing code, from one function to a
-  project-wide suite. ALWAYS USE for "write/add/generate tests", "cover this
-  untested method", scaffolding tests where none exist, or comprehensive suites.
-  Polyglot; supports classic packages.config MSTest, sparse workspaces, and
-  proportional focused work. DO NOT USE for only running/diagnosing tests,
-  coverage/audits, or correcting supplied MSTest assertions, attributes,
-  lifecycle, or configuration without designing new cases
-  (writing-mstest-tests).
+  ALWAYS USE whenever asked to write, add, or generate unit tests for existing
+  code in xUnit, MSTest, NUnit, pytest, Vitest/Jest, Go, or another framework,
+  including "tests only for" one helper, function, class, or missing regression
+  case as well as project-wide suites. Also use for "cover this untested method",
+  scaffolding tests where none exist, sparse workspaces, classic packages.config
+  MSTest, and extending healthy suites. Focused requests use a proportional
+  direct workflow; broad requests use the full pipeline. DO NOT USE for only
+  running/diagnosing tests, coverage/audits, a test blocked on a missing
+  production seam (testability-obstacle), or correcting supplied MSTest
+  assertions, attributes, lifecycle, or configuration without designing new
+  cases (writing-mstest-tests).
 license: MIT
 ---
 
@@ -21,18 +24,56 @@ An AI-powered skill that generates comprehensive, workable unit tests for any pr
 Classify scope **before editing**:
 
 - **Broad** (a project/package-wide suite, or multiple production
-  files/modules): create
-  `.testagent/research.md` and `.testagent/plan.md` before implementation, then
-  `.testagent/status.md` after the final test-quality review. If these files are
-  absent, the broad workflow is incomplete.
+  files/modules): create `research.md` and `plan.md` in a resolved
+  non-stageable `<TESTAGENT_DIR>` before implementation, then `status.md` there
+  after the final test-quality review. When `code-testing-generator` is
+  available, invoke that named custom agent before implementing; do not replace
+  it with a generic subagent carrying the same label or implement the broad
+  request inline. If the state files are absent, the broad workflow is
+  incomplete.
 - **Focused** (the user explicitly limits work to one function/class/file or one
-  missing method): do not create `.testagent/` artifacts or fan out to multiple
+  missing method): do not create intermediate state files or fan out to multiple
   agents. A sparse project-wide request remains broad even when only one source
   module is present.
 
-For either scope, run the narrowest relevant test command to a clean exit and
-finish with a compact `Requirement | Evidence` table. Each requested behavior
-must cite an exact test name; validation rows cite the successful command.
+For either scope, run the narrowest relevant test command to a clean exit.
+Keep the handoff proportional: for one to three focused requirements, use a
+compact bullet list under a **Requirement coverage** label that names the tests
+and successful command; for broader or multi-requirement work, use a
+`Requirement | Evidence` table. Each requested behavior must cite an exact test
+name.
+
+Intermediate state files are internal working data, never deliverables. Keep
+`<TESTAGENT_DIR>` non-stageable, never place it or its files in
+version-controlled workspace content, and never modify `.gitignore` to hide
+them.
+
+Treat completeness as a requirement matrix, not a test-count target. Give every
+independently requested state, boundary, error path, or interaction its own
+concrete assertion. Combine cases only when one execution genuinely proves the
+whole requested combination; do not let a parameterized happy-path case stand in
+for an empty state, invalid discriminator, or before/at/after boundary.
+For broad requests that name several production modules or layers, give each
+named module direct tests for its non-trivial public behavior. Cross-module tests
+prove composition, but do not substitute for the requested module-level
+coverage. Judge breadth by the behavior matrix, never by matching or exceeding a
+raw test count.
+
+For a **broad or comprehensive** request, the explicit matrix is the floor, not
+the ceiling. Treat each requested module or layer as an inventory heading, not
+one behavior: expand it into the bounded public operations and their distinct
+validation paths, branches, boundaries, interactions, and state transitions.
+After satisfying the explicit matrix, inspect each target API for observable
+equivalence partitions and invariants that the prompt did not name: identity,
+empty, singleton and representative interior inputs; exact boundaries plus an
+immediately adjacent value; invalid partitions; and ordering, monotonicity,
+rollover, capacity, truncation, or state invariants implied by the implementation.
+Add one mutation-relevant case per distinct partition not already proved, using
+parameterized or table-driven cases only for siblings that prove the same
+behavior. A passing coverage threshold is validation, not a breadth stop
+condition. Stop when remaining inputs exercise the same branch and invariant,
+not merely when the explicit checklist is complete; never add cases only to
+raise the count.
 
 ## When to Use This Skill
 
@@ -91,7 +132,7 @@ This skill coordinates multiple specialized agents in a **Research → Plan → 
 ### Step 1: Determine the user request
 
 Make sure you understand what user is asking and for what scope.
-When the user does not express strong requirements for test style, coverage goals, or conventions, source the guidelines from [unit-test-generation.prompt.md](unit-test-generation.prompt.md). This prompt provides best practices for discovering conventions, parameterization strategies, coverage goals (aim for 80%), and language-specific patterns.
+When the user does not express strong requirements for test style, coverage goals, or conventions, source the guidelines from [unit-test-generation.prompt.md](unit-test-generation.prompt.md). This prompt provides best practices for discovering conventions, parameterization strategies, behavior-focused coverage, and language-specific patterns.
 
 ### Step 2: Size the request before invoking anything
 
@@ -100,16 +141,28 @@ request costs turns and tool calls without improving the tests.
 
 | Scope | What it looks like | How to run it |
 | --- | --- | --- |
-| **Focused** | One function, class, or file; "tests for X only"; extending an existing suite with the missing cases | Skip the `.testagent/` artifacts and the sub-agent fan-out. Keep the requirement checklist in your head (or in the final table), read only the target and one neighbouring test for conventions, write the tests, run the narrowest test command, review your own assertions inline. |
-| **Broad** | A project, package, or module set; "comprehensive suite"; a coverage threshold to clear across several files | Run the full Research → Plan → Implement pipeline in Step 3, with the `.testagent/` artifacts and the completion contract below. |
+| **Focused** | One function, class, or file; "tests for X only"; extending an existing suite with the missing cases | Skip intermediate state files and the sub-agent fan-out. Keep the requirement checklist in your head (or in the final table), read only the target and one neighbouring test for conventions, write the tests, run the narrowest test command, review your own assertions inline. |
+| **Broad** | A project, package, or module set; "comprehensive suite"; a coverage threshold to clear across several files | Run the full Research → Plan → Implement pipeline in Step 3, with intermediate state files under `<TESTAGENT_DIR>` and the completion contract below. |
 
 When in doubt, start focused and escalate only if the request turns out to span
 several files. Escalating costs one extra pass; running the broad pipeline on a
 focused request costs several.
 
+Before ending a focused request, check all three conditions together:
+
+1. every named behavior has a concrete assertion, including each requested
+   boundary or error path;
+2. the narrow test command exited successfully;
+3. the final handoff maps those behaviors to exact test names and cites that
+   successful command.
+
+Do not replace requirement-level evidence with a generic list of covered areas.
+
 ### Step 3: Invoke the Test Generator (broad scope)
 
-Start by calling the `code-testing-generator` agent with your test generation request:
+Start by invoking the named `code-testing-generator` custom agent with your test
+generation request. Do not use a generic/general-purpose subagent merely named
+`code-testing-generator`:
 
 ```text
 Generate unit tests for [path or description of what to test], following the [unit-test-generation.prompt.md](unit-test-generation.prompt.md) guidelines. Treat the current workspace as authoritative even when it is sparse, gutted-looking, synthetic, or missing tracked files; never restore or reconstruct it, including with `git checkout`, `git restore`, `git reset`, or `git clean`.
@@ -118,34 +171,54 @@ Generate unit tests for [path or description of what to test], following the [un
 The Test Generator will manage the entire pipeline automatically.
 
 If `code-testing-generator` is unavailable, do not skip the workflow. Execute the
-same Research → Plan → Implement sequence inline, create the `.testagent/`
-artifacts described below, and apply the same completion contract.
+same Research → Plan → Implement sequence inline, resolve `<TESTAGENT_DIR>` as
+described below, create the intermediate state files there, and apply the same
+completion contract.
+
+For broad scope, resolve one absolute `<TESTAGENT_DIR>` before creating
+intermediate state files:
+
+1. Prefer a host-provided session artifact or scratch directory.
+2. Otherwise, in a Git worktree run
+   `git rev-parse --path-format=absolute --git-path testagent`; this returns a
+   path in worktree-specific Git metadata that cannot be staged.
+3. Outside Git, create a unique directory under the operating system's
+   temporary directory.
+
+Pass the absolute directory to every pipeline agent. The path may be inside the
+repository's `.git` metadata directory, but it must not be version-controlled
+workspace content, appear in `git status`, or be stageable.
 
 ### Step 4: Execute with bounded context
 
 For multi-file requests:
 
 1. Turn every explicit user requirement into a checklist before implementation. Include requested layers, collaborators to mock, boundary cases, integrations, coverage thresholds, and report artifacts. Copy multi-condition requirements verbatim — they must each map to one test that exercises the whole combination.
-2. Research only the requested module or project and write the checklist plus a compact target inventory to `.testagent/research.md`.
+2. Research only the requested module or project and write the checklist plus a compact target inventory to `<TESTAGENT_DIR>/research.md`.
 3. Reuse manifests, symbol references, and deterministic pairing tools instead of reading every source and test file.
-4. For multi-file scopes in C#, Python, TypeScript/JavaScript, Go, Java, Rust, or Ruby, run `find-untested-sources` once and consume its pairing and suggested-path output; do not repeat that discovery manually.
+4. For multi-file scopes in C#, Python, TypeScript/JavaScript, Go, Java, Rust, Ruby, Kotlin, Swift, PowerShell, or C++, run `find-untested-sources` once and consume its pairing and suggested-path output; do not repeat that discovery manually.
 5. Plan each target file once, then implement phases sequentially. Map every checklist item to at least one concrete test or explain why it is blocked.
-6. Build and test the narrow target during fix cycles; run workspace-level validation once at the end.
+6. Build and test the narrow target during fix cycles. Run workspace-level
+   validation once at the end only for broad work, when the repository contract
+   requires that entry point, or when the changes can affect other projects.
 7. Before reporting success, re-open the generated tests and verify every checklist item against concrete test names and assertions. Coverage alone is not evidence that a requested mock seam, boundary, state transition, or property combination was tested.
 8. Read a language example from `code-testing-extensions` only when the repository has no representative tests and the base extension is insufficient.
 9. For .NET, classify SDK-style vs. classic non-SDK before choosing commands or creating files. In classic projects, preserve `packages.config`, existing framework/mock versions and custom base fixtures, add every new test file to the project's explicit `<Compile Include>` items, and use the repository's MSBuild/test-runner commands. Never modernize the project or dependency stack merely to generate tests.
+10. For MSTest, inspect the pinned package version before choosing exception
+    assertions. MSTest 3.5.x uses `Assert.ThrowsException<T>`; do not substitute
+    `[ExpectedException]`, `Assert.Throws<T>`, or `Assert.ThrowsExactly<T>`.
 
 ### Completion contract
 
 Every scope must satisfy points 3–5 below. Points 1 and 2 are the **broad-scope**
 artifacts: on a focused request the same reasoning happens inline and no
-`.testagent/` files are written.
+intermediate state files are written.
 
 Do not report completion until all of these are true:
 
-1. *(broad scope)* `.testagent/research.md` records the bounded target
+1. *(broad scope)* `<TESTAGENT_DIR>/research.md` records the bounded target
    inventory, existing test conventions, and the acceptance checklist.
-2. *(broad scope)* `.testagent/plan.md` maps each checklist item to a planned
+2. *(broad scope)* `<TESTAGENT_DIR>/plan.md` maps each checklist item to a planned
    test or an explicit blocker.
 3. Generated tests compile and pass with the narrowest relevant test command.
 4. Every explicit user requirement is backed by a concrete test and assertion.
@@ -156,41 +229,54 @@ Do not report completion until all of these are true:
    blocked. For non-behavioral requirements such as scaffolding, scope limits,
    commands, or coverage artifacts, cite the relevant file, command, or report
    instead of forcing a test-name mapping.
+   A passing suite with fewer tests is not automatically weaker: judge
+   completeness by whether every independently requested behavior has direct,
+   nonredundant evidence, not by raw test volume.
+   For broad/comprehensive scope, also verify that every observable equivalence
+   partition and invariant discovered in the bounded target APIs has one
+   mutation-relevant case, even when the prompt did not name it.
+   When the request names multiple modules, verify that each module's own
+   non-trivial public behavior has direct test evidence in addition to any
+   end-to-end composition test.
 5. Review the generated tests for behavior gaps and weak assertions. On a broad
    scope, invoke `test-gap-analysis` and `assertion-quality` when available and
-   record the findings and fixes in `.testagent/status.md`. On a focused scope,
+   record the findings and fixes in `<TESTAGENT_DIR>/status.md`. On a focused scope,
    do the equivalent review inline — re-read each generated assertion against
    the source — without spawning extra passes.
 
-The final response MUST include a compact `Requirement | Evidence` table.
-Behavioral rows cite exact generated test names. Non-behavioral rows cite the
-relevant project file, validation command, or coverage report. A generic list
-of tested areas is not a substitute for requirement-by-requirement evidence.
+The final response must provide requirement-by-requirement evidence. Use compact
+bullets under a **Requirement coverage** label for one to three focused
+requirements; use a `Requirement | Evidence` table for broader scopes.
+Behavioral evidence cites exact generated test names. Non-behavioral evidence
+cites the relevant project file, validation command, or coverage report. A
+generic list of tested areas is not a substitute.
 
-**Quote the user's requirement verbatim in each row.** When the request names a
-specific combination — "a case where a composite discount, regional tax, and
-weight-based shipping all apply", "the difference between summed and chained
-discounts", "constructor validation for every class" — the row must cite the one
-test that demonstrates exactly that. A test that merely exercises the same
-collaborators does not satisfy a requirement about their interaction, and
-per-class requirements need a citation per class.
+Preserve the user's exact meaning in each evidence item; quote verbatim only
+when wording distinguishes a required combination. A test that merely exercises
+the same collaborators does not satisfy a requirement about their interaction,
+and per-class requirements need a citation per class.
 
-**Cite a clean run, not an attempt.** The commands behind the evidence table must
+**Cite a clean run, not an attempt.** The commands behind the final evidence must
 have finished successfully: quote the final passing test summary and, when
 thresholds were requested, the per-module coverage table from a run that exited
 0. If the last coverage run exited non-zero, fix it and re-run before reporting;
 never infer threshold clearance from a failed or partial run.
 
+Before reporting, inspect the final working-tree changes and confirm that
+`research.md`, `plan.md`, `status.md`, and any other intermediate state files are
+not among the changes intended for commit.
+
 ## State Management
 
-Broad-scope runs store pipeline state in the `.testagent/` folder. A focused
-request does not create these files:
+Broad-scope runs store intermediate state files in a non-stageable
+`<TESTAGENT_DIR>` backed by host scratch storage, Git metadata, or OS temp. A
+focused request does not create these files:
 
 | File                     | Purpose                      |
 | ------------------------ | ---------------------------- |
-| `.testagent/research.md` | Codebase analysis results    |
-| `.testagent/plan.md`     | Phased implementation plan   |
-| `.testagent/status.md`   | Final quality review and fixes |
+| `<TESTAGENT_DIR>/research.md` | Codebase analysis results    |
+| `<TESTAGENT_DIR>/plan.md`     | Phased implementation plan   |
+| `<TESTAGENT_DIR>/status.md`   | Final quality review and fixes |
 
 ## Agent Reference
 
@@ -220,7 +306,10 @@ execution as blocked rather than substituting `dotnet test`.
 
 ### Tests don't compile
 
-The `code-testing-fixer` agent will attempt to resolve compilation errors. Check `.testagent/plan.md` for the expected test structure. Call the `code-testing-extensions` skill and read the language-specific extension file for error code references (e.g., `dotnet.md` for .NET).
+The `code-testing-fixer` agent will attempt to resolve compilation errors. Check
+`<TESTAGENT_DIR>/plan.md` for the expected test structure. Call the
+`code-testing-extensions` skill and read the language-specific extension file
+for error code references (e.g., `dotnet.md` for .NET).
 
 ### Tests fail
 
@@ -239,6 +328,9 @@ Specify your preferred framework in the initial request: "Generate Jest tests fo
 
 Tests that depend on external services, network endpoints, specific ports, or precise timing will fail in CI environments. Focus on unit tests with mocked dependencies instead.
 
-### Build fails on full solution
+### Broader validation fails
 
-During phase implementation, build only the specific test project for speed. After all phases, run a full non-incremental workspace build to catch cross-project errors.
+During implementation, build and test the narrow target. Run a solution or
+workspace-level command only for broad work, when the repository contract uses
+that entry point, or when the targeted change can affect other projects. Do not
+turn a focused test request into an unconditional full non-incremental build.

@@ -12,6 +12,17 @@
   const sessionManifestUrl = 'https://raw.githubusercontent.com/dotnet/skills-data/dashboard-session-data/data/manifest.json';
   const replayBaseUrl = 'replay/index.html';
 
+  // Fetch plugin manifest and deployment provenance independently. Older
+  // deployments do not have dashboard-meta.json, so freshness stays unknown
+  // rather than inventing a stale/current classification.
+  let dashboardMeta = null;
+  try {
+    const response = await fetch('data/dashboard-meta.json');
+    if (response.ok) dashboardMeta = await response.json();
+  } catch {
+    dashboardMeta = null;
+  }
+
   // Fetch plugin manifest
   let plugins;
   try {
@@ -27,6 +38,9 @@
     plugins = [];
   }
 
+  // skill-value.json is a compact derived index, not a dashboard plugin.
+  // Components manifests may include it when generated from all JSON data files.
+  plugins = plugins.filter(plugin => plugin !== 'skill-value');
   plugins.sort();
 
   const tabBar = document.getElementById('tab-bar');
@@ -34,16 +48,16 @@
   const loadedPlugins = new Map(); // track loaded plugin data
 
   // Build tabs and placeholder panels
-  plugins.forEach((plugin, idx) => {
+  plugins.forEach((plugin) => {
     const tab = document.createElement('div');
-    tab.className = 'tab' + (idx === 0 ? ' active' : '');
+    tab.className = 'tab';
     tab.textContent = plugin;
     tab.dataset.plugin = plugin;
     tab.addEventListener('click', () => switchTab(plugin));
     tabBar.appendChild(tab);
 
     const panel = document.createElement('div');
-    panel.className = 'tab-content' + (idx === 0 ? ' active' : '');
+    panel.className = 'tab-content';
     panel.id = `panel-${plugin}`;
     panel.innerHTML = '<p style="color:#8b949e;text-align:center;padding:2rem;">Loading...</p>';
     tabContentContainer.appendChild(panel);
@@ -51,25 +65,44 @@
 
   // Add Token Usage tab at the end
   const tokenTabId = '__token-usage__';
-  const noPlugins = plugins.length === 0;
   const tokenTab = document.createElement('div');
-  tokenTab.className = 'tab' + (noPlugins ? ' active' : '');
+  tokenTab.className = 'tab';
   tokenTab.textContent = '🔢 Token Usage';
   tokenTab.dataset.plugin = tokenTabId;
   tokenTab.addEventListener('click', () => switchTab(tokenTabId));
   tabBar.appendChild(tokenTab);
 
   const tokenPanel = document.createElement('div');
-  tokenPanel.className = 'tab-content' + (noPlugins ? ' active' : '');
+  tokenPanel.className = 'tab-content';
   tokenPanel.id = `panel-${tokenTabId}`;
   tokenPanel.innerHTML = '<div id="token-usage-content"><p style="color:#8b949e;text-align:center;padding:2rem;">Loading…</p></div>';
   tabContentContainer.appendChild(tokenPanel);
+
+  // Skill Value is the default landing tab, placed FIRST in the tab bar so the
+  // per-skill value story is the first thing a viewer sees.
+  const skillValueTabId = '__skill-value__';
+  const skillValueTab = document.createElement('div');
+  skillValueTab.className = 'tab active';
+  skillValueTab.textContent = '💡 Skill Value';
+  skillValueTab.dataset.plugin = skillValueTabId;
+  skillValueTab.addEventListener('click', () => switchTab(skillValueTabId));
+  tabBar.insertBefore(skillValueTab, tabBar.firstChild);
+
+  const skillValuePanel = document.createElement('div');
+  skillValuePanel.className = 'tab-content active';
+  skillValuePanel.id = `panel-${skillValueTabId}`;
+  skillValuePanel.innerHTML = '<div id="skill-value-content"><p style="color:#8b949e;text-align:center;padding:2rem;">Loading…</p></div>';
+  tabContentContainer.appendChild(skillValuePanel);
 
   async function switchTab(plugin) {
     tabBar.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.plugin === plugin));
     tabContentContainer.querySelectorAll('.tab-content').forEach(p => p.classList.toggle('active', p.id === `panel-${plugin}`));
     if (plugin === tokenTabId) {
       if (window.initTokenUsage) window.initTokenUsage();
+      return;
+    }
+    if (plugin === skillValueTabId) {
+      if (window.initSkillValue) window.initSkillValue();
       return;
     }
     if (!loadedPlugins.has(plugin)) {
@@ -201,7 +234,10 @@
     });
   }
   function legendLabelsWithModelMarker(chart) {
-    return Chart.defaults.plugins.legend.labels.generateLabels(chart).map(function(l) {
+    return Chart.defaults.plugins.legend.labels.generateLabels(chart).filter(function(l) {
+      const ds = chart.data.datasets[l.datasetIndex];
+      return ds && !ds.hidden;
+    }).map(function(l) {
       const ds = chart.data.datasets[l.datasetIndex];
       const seriesColor = ds && ds.borderColor ? ds.borderColor : l.strokeStyle;
       const marker = ds && ds.modelMarker ? ds.modelMarker : { style: 'rect', rotation: 0 };
@@ -259,19 +295,10 @@
     return value < 0.001 ? value.toExponential(2) : value.toFixed(3);
   }
 
-  function verdictDisplay(verdict) {
-    const reasonCode = verdict && verdict.stateReason && verdict.stateReason.code;
-    if (verdict && verdict.state === 'VALID_PASS') return { label: 'Improved', cls: 'pass' };
-    if (verdict && verdict.state === 'VALID_REGRESSION') return { label: 'Objective regression', cls: 'fail' };
-    const legacyPreferenceLoss = verdict &&
-      (!verdict.state || verdict.state === 'VALID_NO_CHANGE') &&
-      (verdict.preferenceRegressed || verdict.regressed);
-    if (reasonCode === 'preference_regression_report_only' || legacyPreferenceLoss) {
-      return { label: 'Preference loss (report only)', cls: 'warning' };
-    }
-    if (verdict && verdict.state === 'INVALID_INCONCLUSIVE') return { label: 'Invalid or underpowered', cls: 'warning' };
-    if (verdict && verdict.passed) return { label: 'Improved (legacy)', cls: 'pass' };
-    return { label: 'Not proven improved', cls: 'neutral' };
+  const verdictDisplay = window.VerdictDisplay?.forVerdict
+    ?? (typeof require === 'function' ? require('./dashboard-verdict.js').forVerdict : null);
+  if (!verdictDisplay) {
+    throw new Error('dashboard-verdict.js must load before dashboard.js');
   }
 
   function activationStatusLabel(status) {
@@ -301,6 +328,8 @@
     let dormant = 0;
     let unexpected = 0;
     let active = 0;
+    let isolatedActivationOnlyFailures = 0;
+    let pluginActivationOnlyFailures = 0;
     scenarios.forEach(s => {
       for (const status of [s.isolated, s.plugin]) {
         if (!status) continue;
@@ -309,14 +338,23 @@
         else if (status === 'unexpected-activation') unexpected++;
         else if (status === 'activated') active++;
       }
+      isolatedActivationOnlyFailures += s.isolatedActivationOnlyFailedRuns || 0;
+      pluginActivationOnlyFailures += s.pluginActivationOnlyFailedRuns || 0;
     });
 
     const parts = [];
     if (missing) parts.push(`${missing} missing`);
     if (unexpected) parts.push(`${unexpected} unexpected`);
+    if (isolatedActivationOnlyFailures) {
+      parts.push(`${isolatedActivationOnlyFailures} isolated failed after activation`);
+    }
+    if (pluginActivationOnlyFailures) {
+      parts.push(`${pluginActivationOnlyFailures} plugin failed after activation`);
+    }
     if (dormant) parts.push(`${dormant} dormant as expected`);
     if (active) parts.push(`${active} activated`);
-    return parts.length ? parts.join(' · ') : 'Activation evidence unavailable';
+    const prefix = verdict.skillKind === 'agent' ? 'Agent' : 'Skill';
+    return parts.length ? `${prefix}: ${parts.join(' · ')}` : `${prefix} activation evidence unavailable`;
   }
 
   function safeEvidenceUrl(value) {
@@ -335,12 +373,23 @@
     const count = Number.isFinite(gate.stimulusVoteCount)
       ? gate.stimulusVoteCount
       : (gate.wins || 0) + (gate.ties || 0) + (gate.losses || 0);
+    const usesPreferenceEligibleVotes = Object.prototype.hasOwnProperty.call(
+      gate,
+      'excludedStimulusCount',
+    );
+    const voteLabel = usesPreferenceEligibleVotes
+      ? 'preference-eligible stimulus vote'
+      : 'stimulus vote';
+    const excluded = usesPreferenceEligibleVotes && Number.isFinite(gate.excludedStimulusCount)
+      ? gate.excludedStimulusCount
+      : 0;
     return `
-      <div><strong>${count}</strong> stimulus vote${count === 1 ? '' : 's'} &middot;
+      <div><strong>${count}</strong> ${voteLabel}${count === 1 ? '' : 's'} &middot;
         <strong>${gate.wins || 0}W/${gate.ties || 0}T/${gate.losses || 0}L</strong></div>
       <div class="evidence-secondary">discordant <strong>${gate.discordant || 0}</strong> &middot;
         sign-test p=<strong>${formatPValue(gate.pValue)}</strong> &middot;
         net win <strong>${formatPercent(gate.netWin)}</strong></div>
+      ${excluded ? `<div class="evidence-secondary"><strong>${excluded}</strong> ${excluded === 1 ? 'dormancy stimulus' : 'dormancy stimuli'} retained as activation-contract evidence and excluded from preference</div>` : ''}
     `;
   }
 
@@ -351,8 +400,33 @@
       const expectation = s.expectation === 'reference'
         ? 'reference-only'
         : s.expectation === 'dormant' ? 'should stay dormant' : 'should activate';
+      const preference = s.preferenceGateEligible === false
+        ? '; preference: excluded'
+        : '; preference: eligible';
       const pluginStatus = s.plugin ? `; plugin: ${activationStatusLabel(s.plugin)}` : '';
-      return `<li><strong>${escapeHtml(s.scenarioName)}</strong> (${escapeHtml(expectation)}): isolated: ${escapeHtml(activationStatusLabel(s.isolated))}${escapeHtml(pluginStatus)}</li>`;
+      const delegated = Array.isArray(s.delegatedAgents) && s.delegatedAgents.length
+        ? `; delegated: ${s.delegatedAgents.join(', ')}`
+        : '';
+      const skills = Array.isArray(s.invokedSkills) && s.invokedSkills.length
+        ? `; skills: ${s.invokedSkills.join(', ')}`
+        : '';
+      const tools = Array.isArray(s.isolatedTools) && s.isolatedTools.length
+        ? `; tools: ${s.isolatedTools.join(', ')}`
+        : '';
+      const completion = typeof s.isolatedCompleted === 'boolean'
+        ? `; completed: ${s.isolatedCompleted ? 'yes' : 'no'}`
+        : '';
+      const activationOnly = [];
+      if (s.isolatedActivationOnlyFailedRuns) {
+        activationOnly.push(`isolated activation-only failures: ${s.isolatedActivationOnlyFailedRuns}`);
+      }
+      if (s.pluginActivationOnlyFailedRuns) {
+        activationOnly.push(`plugin activation-only failures: ${s.pluginActivationOnlyFailedRuns}`);
+      }
+      const activationOnlyStatus = activationOnly.length
+        ? `; ${activationOnly.join('; ')}`
+        : '';
+      return `<li><strong>${escapeHtml(s.scenarioName)}</strong> (${escapeHtml(expectation)}): isolated: ${escapeHtml(activationStatusLabel(s.isolated))}${escapeHtml(pluginStatus)}${escapeHtml(delegated)}${escapeHtml(skills)}${escapeHtml(tools)}${escapeHtml(completion)}${escapeHtml(activationOnlyStatus)}${escapeHtml(preference)}</li>`;
     }).join('');
     return `
       <div>${escapeHtml(activationSummary(verdict))}</div>
@@ -405,12 +479,46 @@
 
     container.innerHTML = Array.from(latestByModel.entries()).map(([model, entry]) => {
       const date = new Date(entry.date);
+      const freshness = window.EvidenceFreshness
+        ? window.EvidenceFreshness.assess(entry, dashboardMeta)
+        : { stale: false, comparable: false };
+      const evidenceCommit = entry && entry.commit ? entry.commit : {};
+      const evidenceId = freshness.evidenceId || evidenceCommit.id || '';
+      const deployedId = freshness.deployedId || '';
+      const evidenceUrl = safeEvidenceUrl(evidenceCommit.url);
+      const deployedUrl = safeEvidenceUrl(
+        dashboardMeta && dashboardMeta.deployedCommit && dashboardMeta.deployedCommit.url
+      );
+      const commitLabel = evidenceId ? evidenceId.substring(0, 8) : 'unknown';
+      const commitHtml = evidenceUrl
+        ? `<a href="${escapeHtml(evidenceUrl)}" target="_blank" rel="noopener">${escapeHtml(commitLabel)}</a>`
+        : escapeHtml(commitLabel);
+      let freshnessHtml = '';
+      if (freshness.stale) {
+        const deployedLabel = deployedId.substring(0, 8);
+        const deployedHtml = deployedUrl
+          ? `<a href="${escapeHtml(deployedUrl)}" target="_blank" rel="noopener">${escapeHtml(deployedLabel)}</a>`
+          : escapeHtml(deployedLabel);
+        const age = window.EvidenceFreshness.formatAge(freshness.ageMs);
+        const relation = freshness.older
+          ? `is ${escapeHtml(age)} older than`
+          : 'does not match';
+        const guidance = freshness.older
+          ? 'This is retained evidence, not a measurement of the deployed main commit.'
+          : 'Commit age is unavailable or non-older; verify this revision before treating it as current.';
+        freshnessHtml = `<div class="evidence-freshness stale" role="alert">⚠ Evidence commit ${commitHtml} ${relation} deployed main commit ${deployedHtml}. ${guidance}</div>`;
+      } else if (freshness.comparable) {
+        freshnessHtml = `<div class="evidence-freshness current">Evidence commit ${commitHtml} matches the deployed main commit.</div>`;
+      } else {
+        freshnessHtml = `<div class="evidence-freshness unknown">Evidence commit ${commitHtml}; deployment comparison unavailable.</div>`;
+      }
       const rows = entry.verdictEvidence.map(verdict => {
         const display = verdictDisplay(verdict);
         return `<tr>
           <th scope="row">
             ${escapeHtml(verdict.skillName)}
             ${verdict.skillKind === 'reference' ? '<span class="evidence-tag">reference</span>' : ''}
+            ${verdict.skillKind === 'agent' ? '<span class="evidence-tag">agent</span>' : ''}
           </th>
           <td>
             <span class="verdict-badge ${display.cls}">${escapeHtml(display.label)}</span>
@@ -423,17 +531,81 @@
       }).join('');
       return `
         <section class="evidence-run">
-          <h3>${escapeHtml(model)} <span>latest evidence run · ${escapeHtml(date.toLocaleString())}</span></h3>
+          <h3>${escapeHtml(model)} <span>latest retained evidence · ${escapeHtml(date.toLocaleString())}</span></h3>
+          ${freshnessHtml}
           <div class="evidence-table-wrap">
             <table class="evidence-table">
               <caption>Authoritative verdict and supporting evidence for ${escapeHtml(model)}</caption>
-              <thead><tr><th>Skill</th><th>Verdict</th><th>Gate evidence</th><th>Activation</th><th>Judge evidence</th></tr></thead>
+              <thead><tr><th>Target</th><th>Verdict</th><th>Gate evidence</th><th>Activation</th><th>Judge evidence</th></tr></thead>
               <tbody>${rows}</tbody>
             </table>
           </div>
         </section>
       `;
     }).join('');
+  }
+
+  function createIssueFlags() {
+    return {
+      notActivated: false,
+      timedOut: false,
+      overfittingModerate: false,
+      overfittingHigh: false,
+      multiIssue: false,
+    };
+  }
+
+  function recordIssueFlags(flags, notActivated, timedOut, overfitting) {
+    if (notActivated) flags.notActivated = true;
+    if (timedOut) flags.timedOut = true;
+    if (overfitting === 'high') flags.overfittingHigh = true;
+    else if (overfitting) flags.overfittingModerate = true;
+    if ((notActivated ? 1 : 0) + (timedOut ? 1 : 0) + (overfitting ? 1 : 0) > 1) {
+      flags.multiIssue = true;
+    }
+  }
+
+  function combineIssueFlags(entryFlags, indexes) {
+    const combined = createIssueFlags();
+    indexes.forEach(index => {
+      const flags = entryFlags[index];
+      if (!flags) return;
+      combined.notActivated ||= flags.notActivated;
+      combined.timedOut ||= flags.timedOut;
+      combined.overfittingModerate ||= flags.overfittingModerate;
+      combined.overfittingHigh ||= flags.overfittingHigh;
+      combined.multiIssue ||= flags.multiIssue;
+    });
+    return combined;
+  }
+
+  function refreshLegendNotes(container, flags) {
+    container.innerHTML = '';
+    appendLegendNotes(container, flags);
+  }
+
+  const FILTERED_DATASET_PROPERTIES = [
+    'data',
+    'pointBackgroundColor',
+    'pointBorderColor',
+    'pointStyle',
+    'pointRotation',
+    'pointRadius',
+    'pointBorderWidth',
+  ];
+
+  function captureDatasetArrays(dataset) {
+    const captured = {};
+    FILTERED_DATASET_PROPERTIES.forEach(property => {
+      if (Array.isArray(dataset[property])) captured[property] = dataset[property].slice();
+    });
+    return captured;
+  }
+
+  function applyDatasetIndexes(dataset, captured, indexes) {
+    Object.entries(captured).forEach(([property, values]) => {
+      dataset[property] = indexes.map(index => values[index]);
+    });
   }
 
   function renderPlugin(plugin, data, panel) {
@@ -456,9 +628,11 @@
     activeModelMarkers = pluginModelMarkers;
 
     // Model filter state: every model is enabled by default. The filter bar (built
-    // below) lets the viewer focus on a subset; toggling re-renders via draw().
+    // below) lets the viewer focus on a subset.
     const activeModels = new Set(allModels);
     const liveCharts = [];
+    let chartsInitialized = false;
+    let pendingDraw = false;
 
     const replayHref = `${replayBaseUrl}?manifest=${encodeURIComponent(sessionManifestUrl)}&tag=${encodeURIComponent(plugin)}`;
 
@@ -468,7 +642,7 @@
            style="color:#58a6ff;font-size:13px;text-decoration:none;">&#9654; Sessions Visualisation</a>
       </div>
       <div id="model-filter-${plugin}" style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:16px;"></div>
-      <div class="interpretation-note"><strong>Pass gate:</strong> distinct-stimulus W/T/L, the exact sign test over discordant votes, and net win. <strong>Score averages:</strong> triage only; 0&ndash;10 quality does not decide pass/fail.</div>
+      <div class="interpretation-note"><strong>Pass gate:</strong> preference-eligible distinct-stimulus W/T/L, the exact sign test over discordant votes, net win, and explicit dormancy activation contracts. Dormancy comparison outcomes remain visible but do not vote. <strong>Score averages:</strong> triage only; 0&ndash;10 quality does not decide pass/fail.</div>
       <h2 class="section-title">Latest Verdict Evidence</h2>
       <div id="verdict-evidence-${plugin}"></div>
       <h2 class="section-title">Quality Score Triage</h2>
@@ -489,17 +663,16 @@
       const qualityEntries = allQualityEntries.filter(e => activeModels.has((e && e.model) ? e.model : 'unknown'));
       const efficiencyEntries = allEfficiencyEntries.filter(e => activeModels.has((e && e.model) ? e.model : 'unknown'));
 
-      // Tear down the previous render so charts don't leak and canvases aren't reused.
-      liveCharts.forEach(c => { try { c.destroy(); } catch { /* already detached */ } });
-      liveCharts.length = 0;
       const _summary = document.getElementById(`summary-${plugin}`);
       const _verdictEvidence = document.getElementById(`verdict-evidence-${plugin}`);
       const _quality = document.getElementById(`quality-${plugin}`);
       const _efficiency = document.getElementById(`efficiency-${plugin}`);
       if (_summary) _summary.innerHTML = '';
       if (_verdictEvidence) _verdictEvidence.innerHTML = '';
-      if (_quality) _quality.innerHTML = '';
-      if (_efficiency) _efficiency.innerHTML = '';
+      if (!chartsInitialized) {
+        if (_quality) _quality.innerHTML = '';
+        if (_efficiency) _efficiency.innerHTML = '';
+      }
 
     if (_verdictEvidence) {
       renderVerdictEvidence(qualityEntries, _verdictEvidence);
@@ -618,9 +791,10 @@
       }
     }
 
-    // Quality charts
-    const qualityChartsDiv = document.getElementById(`quality-${plugin}`);
-    if (qualityEntries.length > 0) {
+    if (!chartsInitialized) {
+      // Quality charts
+      const qualityChartsDiv = document.getElementById(`quality-${plugin}`);
+      if (qualityEntries.length > 0) {
       // Discover tests from all entries (not just latest, which may have partial data)
       const tests = new Set();
       let hasAnyPlugin = false;
@@ -650,11 +824,11 @@
           ));
         }
       });
-    }
+      }
 
-    // Efficiency charts
-    const efficiencyChartsDiv = document.getElementById(`efficiency-${plugin}`);
-    if (efficiencyEntries.length > 0) {
+      // Efficiency charts
+      const efficiencyChartsDiv = document.getElementById(`efficiency-${plugin}`);
+      if (efficiencyEntries.length > 0) {
       // Discover tests from all entries (not just latest, which may have partial data)
       const effTests = new Set();
       let hasAnyPluginEff = false;
@@ -689,9 +863,9 @@
         const plugTokenName = `${test} - Plugin Tokens In`;
         const vanTimeName = `${test} - Vanilla Time`;
         const vanTokenName = `${test} - Vanilla Tokens In`;
-        const legendFlags = { notActivated: false, timedOut: false, overfittingModerate: false, overfittingHigh: false, multiIssue: false };
+        const entryLegendFlags = efficiencyEntries.map(() => createIssueFlags());
 
-        const perEntryData = efficiencyEntries.map(e => {
+        const perEntryData = efficiencyEntries.map((e, entryIndex) => {
           let timeBench = undefined;
           let tokenBench = undefined;
           let plugTimeBench = undefined;
@@ -712,15 +886,10 @@
           const tokenTO = !!(tokenBench && tokenBench.timedOut);
           const timeOF = timeBench && timeBench.overfitting ? timeBench.overfitting : null;
           const tokenOF = tokenBench && tokenBench.overfitting ? tokenBench.overfitting : null;
-          if (timeNA || tokenNA) legendFlags.notActivated = true;
-          if (timeTO || tokenTO) legendFlags.timedOut = true;
-          if (timeOF || tokenOF) {
-            if (timeOF === 'high' || tokenOF === 'high') legendFlags.overfittingHigh = true;
-            else legendFlags.overfittingModerate = true;
-          }
-          const timeIssues = (timeNA ? 1 : 0) + (timeTO ? 1 : 0) + (timeOF ? 1 : 0);
-          const tokenIssues = (tokenNA ? 1 : 0) + (tokenTO ? 1 : 0) + (tokenOF ? 1 : 0);
-          if (timeIssues > 1 || tokenIssues > 1) legendFlags.multiIssue = true;
+          const entryFlags = entryLegendFlags[entryIndex];
+          recordIssueFlags(entryFlags, timeNA, timeTO, timeOF);
+          recordIssueFlags(entryFlags, tokenNA, tokenTO, tokenOF);
+          if (entryFlags.overfittingHigh) entryFlags.overfittingModerate = false;
           return {
             timeValue: timeBench ? timeBench.value : null,
             timeNotActivated: timeNA,
@@ -736,6 +905,10 @@
             vanTokenValue: vanTokenBench ? vanTokenBench.value / 1000 : null,
           };
         });
+        const legendFlags = combineIssueFlags(
+          entryLegendFlags,
+          efficiencyEntries.map((_, index) => index)
+        );
 
         const timeData = perEntryData.map(d => d.timeValue);
         const tokenData = perEntryData.map(d => d.tokenValue);
@@ -853,6 +1026,9 @@
           });
         }
 
+        let visibleEfficiencyEntries = efficiencyEntries;
+        const sourceLabels = labels.slice();
+        const datasetSources = datasets.map(captureDatasetArrays);
         const effChart = new Chart(canvas, {
           type: 'line',
           data: {
@@ -868,7 +1044,7 @@
                 callbacks: {
                   afterTitle: (items) => {
                     const idx = items[0].dataIndex;
-                    const entry = efficiencyEntries[idx];
+                    const entry = visibleEfficiencyEntries[idx];
                     const parts = [];
                     if (entry && entry.model) parts.push(`Model: ${entry.model}`);
                     if (entry && entry.commit) {
@@ -901,14 +1077,51 @@
           }
         });
 
-        appendLegendNotes(div, legendFlags);
+        const issueNotes = document.createElement('div');
+        refreshLegendNotes(issueNotes, legendFlags);
+        div.appendChild(issueNotes);
+        effChart.applyModelFilter = (models) => {
+          const indexes = [];
+          efficiencyEntries.forEach((entry, index) => {
+            const model = (entry && entry.model) ? entry.model : 'unknown';
+            if (models.has(model)) indexes.push(index);
+          });
+          visibleEfficiencyEntries = indexes.map(index => efficiencyEntries[index]);
+          effChart.data.labels = indexes.map(index => sourceLabels[index]);
+          effChart.data.datasets.forEach((dataset, index) => {
+            applyDatasetIndexes(dataset, datasetSources[index], indexes);
+          });
+          div.style.display = effChart.data.datasets.some(dataset =>
+            dataset.data.some(value => value != null)
+          ) ? '' : 'none';
+          refreshLegendNotes(issueNotes, combineIssueFlags(entryLegendFlags, indexes));
+          effChart.update('none');
+        };
+
         liveCharts.push(effChart);
+      });
+      }
+      chartsInitialized = true;
+    } else {
+      liveCharts.forEach(chart => {
+        if (chart && chart.applyModelFilter) chart.applyModelFilter(activeModels);
       });
     }
     } // end draw()
 
+    function scheduleDraw() {
+      if (pendingDraw) return;
+      pendingDraw = true;
+      const schedule = window.requestAnimationFrame || (callback => setTimeout(callback, 0));
+      schedule(() => {
+        pendingDraw = false;
+        draw();
+      });
+    }
+
     // Per-model filter bar: all models enabled by default. Toggling a model
-    // re-renders the summary table and every chart for just the selected models.
+    // updates the existing charts for just the selected models. Changes within
+    // one browser frame are coalesced so rapid toggles only trigger one refresh.
     // Colours stay canonical (bound to full history), so hiding a model never
     // recolours the others. Only shown when there is more than one model.
     const filterBar = document.getElementById(`model-filter-${plugin}`);
@@ -930,7 +1143,7 @@
             return;
           }
           if (cb.checked) activeModels.add(m); else activeModels.delete(m);
-          draw();
+          scheduleDraw();
         });
         const marker = document.createElement('span');
         const modelMarker = markerForModel(m, allModels);
@@ -974,8 +1187,10 @@
     const modelOf = entries.map(e => (e && e.model) ? e.model : 'unknown');
     const allNames = variants.map(v => v.name);
 
-    const legendFlags = { notActivated: false, timedOut: false, overfittingModerate: false, overfittingHigh: false, multiIssue: false };
+    const legendFlags = createIssueFlags();
+    const entryLegendFlags = entries.map(() => createIssueFlags());
     const datasets = [];
+    const datasetModels = [];
 
     variants.forEach(v => {
       // Bench for this variant at each entry (or null when absent).
@@ -984,13 +1199,11 @@
       // Issue legend flags come from the skilled-side variants only (matches the
       // previous behaviour where Vanilla did not raise issue markers).
       if (!v.vanilla) {
-        per.forEach(b => {
+        per.forEach((b, index) => {
           if (!b) return;
           const na = !!b.notActivated, to = !!b.timedOut, of = b.overfitting || null;
-          if (na) legendFlags.notActivated = true;
-          if (to) legendFlags.timedOut = true;
-          if (of) { if (of === 'high') legendFlags.overfittingHigh = true; else legendFlags.overfittingModerate = true; }
-          if ((na ? 1 : 0) + (to ? 1 : 0) + (of ? 1 : 0) > 1) legendFlags.multiIssue = true;
+          recordIssueFlags(legendFlags, na, to, of);
+          recordIssueFlags(entryLegendFlags[index], na, to, of);
         });
       }
 
@@ -1056,9 +1269,13 @@
           spanGaps: false,
           fill: false,
         });
+        datasetModels.push(m);
       });
     });
 
+    let visibleEntries = entries;
+    const sourceLabels = labels.slice();
+    const datasetSources = datasets.map(captureDatasetArrays);
     const chart = new Chart(canvas, {
       type: 'line',
       data: { labels, datasets },
@@ -1076,7 +1293,7 @@
             callbacks: {
               afterTitle: (items) => {
                 const idx = items[0].dataIndex;
-                const entry = entries[idx];
+                const entry = visibleEntries[idx];
                 const parts = [];
                 if (entry && entry.model) parts.push(`Model: ${entry.model}`);
                 if (entry && entry.commit) {
@@ -1096,6 +1313,36 @@
       }
     });
 
+    const issueNotes = document.createElement('div');
+    refreshLegendNotes(issueNotes, legendFlags);
+    let visibleModels = new Set(models);
+    chart.applyModelFilter = (activeModels) => {
+      const indexes = [];
+      entries.forEach((entry, index) => {
+        const model = (entry && entry.model) ? entry.model : 'unknown';
+        if (activeModels.has(model)) indexes.push(index);
+      });
+      visibleEntries = indexes.map(index => entries[index]);
+      chart.data.labels = indexes.map(index => sourceLabels[index]);
+      chart.data.datasets.forEach((dataset, index) => {
+        applyDatasetIndexes(dataset, datasetSources[index], indexes);
+        const model = datasetModels[index];
+        const modelVisible = activeModels.has(model);
+        dataset.hidden = !modelVisible;
+        if (modelVisible !== visibleModels.has(model)) {
+          chart.setDatasetVisibility(index, modelVisible);
+        }
+      });
+      const visibleDatasetCount = datasetModels.filter(model => activeModels.has(model)).length;
+      chart.options.plugins.legend.display = visibleDatasetCount <= MAX_INLINE_LEGEND_SERIES;
+      div.style.display = chart.data.datasets.some(dataset =>
+        !dataset.hidden && dataset.data.some(value => value != null)
+      ) ? '' : 'none';
+      refreshLegendNotes(issueNotes, combineIssueFlags(entryLegendFlags, indexes));
+      chart.update('none');
+      visibleModels = new Set(activeModels);
+    };
+
     const dashName = d => (!d || !d.length) ? 'solid' : (d[0] >= 6 ? 'dashed' : 'dotted');
     const cap = document.createElement('div');
     cap.className = 'not-activated-legend';
@@ -1104,8 +1351,7 @@
       : 'Line colour + point shape = model \u00B7 ';
     cap.innerHTML = colourKey + variants.map(v => `${dashName(v.dash)} = ${escapeHtml(v.label)}`).join(', ');
     div.appendChild(cap);
-
-    appendLegendNotes(div, legendFlags);
+    div.appendChild(issueNotes);
     return chart;
   }
 
@@ -1126,8 +1372,16 @@
     ]);
   }
 
-  // Load first plugin immediately (skip if no evaluation plugins)
-  if (plugins.length > 0) {
-    await loadPlugin(plugins[0]);
+  // Skill Value is the default active tab, so render it immediately. Plugin tabs
+  // load lazily on first click; Token Usage self-inits when its tab is shown.
+  if (window.initSkillValue) {
+    window.initSkillValue();
+  } else if (plugins.length > 0) {
+    // Defensive fallback: if skill-value.js failed to load, activate the first plugin.
+    await switchTab(plugins[0]);
+  } else {
+    // No plugins either — fall back to Token Usage so the page is not stuck on
+    // the Skill Value panel's permanent "Loading…".
+    await switchTab(tokenTabId);
   }
 })();
