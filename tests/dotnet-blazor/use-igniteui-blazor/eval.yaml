@@ -111,7 +111,7 @@ stimuli:
           substring: IgniteUI.Blazor.GridLite
       - type: output-matches
         config:
-          pattern: '_content/IgniteUI\.Blazor\.GridLite/css/themes/'
+          pattern: '_content/IgniteUI\.Blazor\.GridLite/themes/'
       - type: prompt
     rubric:
       - Does not register the Ignite UI services in Program.cs
