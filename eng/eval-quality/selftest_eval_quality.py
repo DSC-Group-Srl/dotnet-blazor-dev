@@ -1386,6 +1386,62 @@ def execution_shard_relocation_with_semantic_change(d):
         f.write("config:\n  timeout: 5m\n")
 
 
+def vally_schema_alias_migration(d):
+    path = EV(d)
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    legacy = content.replace("defaults:\n", "config:\n", 1)
+    legacy = legacy.replace(
+        "  - name: Does the thing\n"
+        "    prompt: do it\n",
+        "  - name: Does the thing\n"
+        "    prompt: do it\n"
+        "    constraints:\n"
+        "      expect_tools: [bash]\n",
+        1,
+    )
+    legacy = legacy.replace(
+        "  - name: Does the last thing\n"
+        "    prompt: do the last thing\n",
+        "  - name: Does the last thing\n"
+        "    expect_activation: true\n"
+        "    prompt: do the last thing\n",
+        1,
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(legacy)
+    subprocess.run(["git", "add", "-A"], cwd=d, check=True)
+    subprocess.run(["git", "commit", "-qm", "legacy vally schema"], cwd=d, check=True)
+
+    current = legacy.replace("config:\n", "defaults:\n", 1)
+    current = current.replace(
+        "    constraints:\n"
+        "      expect_tools: [bash]\n",
+        "    graders:\n"
+        "      - type: tool-calls\n"
+        "        config:\n"
+        "          required: [bash]\n",
+        1,
+    )
+    current = current.replace(
+        "    expect_activation: true\n",
+        "    tags:\n"
+        '      expect_activation: "true"\n',
+        1,
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(current)
+
+
+def vally_schema_alias_migration_with_semantic_change(d):
+    vally_schema_alias_migration(d)
+    path = EV(d)
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content.replace("prompt: do it", "prompt: do it differently", 1))
+
+
 def preexisting_deprecated_config_with_unrelated_change(d):
     path = EV(d)
     with open(path) as f:
@@ -1474,8 +1530,7 @@ def grandfathered_reports_its_arithmetic(d):
 
 
 def grandfathered_config_alias_reports_its_runs(d):
-    # Vally 0.14 still loads this alias but warns. The repository gate requires
-    # one current settings spelling so the deprecated shape cannot return.
+    # The repository gate keeps the removed alias from returning.
     write_single_stimulus(d, runs=4, settings_key="config")
     write_allowlist(d, SPEC)
 
@@ -1485,12 +1540,15 @@ def wildcard_rejects_target_skill(d):
         f.write(
             "  - name: Decline off-target request\n"
             "    prompt: write me something else\n"
-            "    expect_activation: false\n"
+            "    tags:\n"
+            '      expect_activation: "false"\n'
             "    rubric:\n"
             "      - Did not derail into widget analysis\n"
-            "    constraints:\n"
-            "      reject_skills:\n"
-            '        - "*"\n'
+            "    graders:\n"
+            "      - type: skill-invocation\n"
+            "        config:\n"
+            "          disallowed:\n"
+            '            - "*"\n'
         )
 
 
@@ -1501,9 +1559,11 @@ def wildcard_reject_on_capability(d):
             "    prompt: analyze this widget\n"
             "    rubric:\n"
             "      - Completed the widget analysis\n"
-            "    constraints:\n"
-            "      reject_skills:\n"
-            '        - "*"\n'
+            "    graders:\n"
+            "      - type: skill-invocation\n"
+            "        config:\n"
+            "          disallowed:\n"
+            '            - "*"\n'
         )
 
 
@@ -1512,12 +1572,15 @@ def named_reject_on_dormancy_guard(d):
         f.write(
             "  - name: Decline named off-target request\n"
             "    prompt: write me something else\n"
-            "    expect_activation: false\n"
+            "    tags:\n"
+            '      expect_activation: "false"\n'
             "    rubric:\n"
             "      - Did not derail into widget analysis\n"
-            "    constraints:\n"
-            "      reject_skills:\n"
-            "        - widget\n"
+            "    graders:\n"
+            "      - type: skill-invocation\n"
+            "        config:\n"
+            "          disallowed:\n"
+            "            - widget\n"
         )
 
 
@@ -1526,11 +1589,14 @@ def scalar_reject_on_dormancy_guard(d):
         f.write(
             "  - name: Decline malformed off-target request\n"
             "    prompt: write me something else\n"
-            "    expect_activation: false\n"
+            "    tags:\n"
+            '      expect_activation: "false"\n'
             "    rubric:\n"
             "      - Did not derail into widget analysis\n"
-            "    constraints:\n"
-            "      reject_skills: widget\n"
+            "    graders:\n"
+            "      - type: skill-invocation\n"
+            "        config:\n"
+            "          disallowed: widget\n"
         )
 
 
@@ -1539,7 +1605,8 @@ def guard_ok(d):
         f.write(
             "  - name: Decline off-target request\n"
             "    prompt: write me something else\n"
-            "    expect_activation: false\n"
+            "    tags:\n"
+            '      expect_activation: "false"\n'
             "    rubric:\n"
             "      - Did not derail into widget analysis\n"
         )
@@ -1555,7 +1622,8 @@ def dormancy_does_not_satisfy_preference_floor(d):
         "    rubric:\n"
         "      - Did the last thing\n",
         "  - name: Does the last thing\n"
-        "    expect_activation: false\n"
+        "    tags:\n"
+        '      expect_activation: "false"\n'
         "    prompt: do the last thing\n"
         "    rubric:\n"
         "      - Stayed dormant and did not derail the request\n",
@@ -1919,6 +1987,14 @@ results = [
     output_case("pure execution shard metadata relocation is non-semantic",
                 execution_shard_metadata_relocation,
                 "enforced 0 changed eval suite(s) of 1 total against HEAD",
+                gate_args=("--base-ref", "HEAD")),
+    output_case("removed Vally aliases migrate without semantic scope",
+                vally_schema_alias_migration,
+                "enforced 0 changed eval suite(s) of 1 total against HEAD",
+                gate_args=("--base-ref", "HEAD")),
+    output_case("schema migration plus semantic edit remains enforced",
+                vally_schema_alias_migration_with_semantic_change,
+                "enforced 1 changed eval suite(s) of 1 total against HEAD",
                 gate_args=("--base-ref", "HEAD")),
     output_case("execution shard value change remains semantic",
                 execution_shard_value_change,

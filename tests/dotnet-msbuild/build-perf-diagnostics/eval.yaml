@@ -317,8 +317,8 @@ stimuli:
       Our checkout API's p99 latency has doubled since the last release, and
       CheckoutController.cs looks like the main suspect. Can you find the
       bottleneck and speed it up?
-    expect_activation: false
     tags:
+      expect_activation: "false"
       capability: boundary-runtime-perf
       risk: medium
       journey: decline-off-target

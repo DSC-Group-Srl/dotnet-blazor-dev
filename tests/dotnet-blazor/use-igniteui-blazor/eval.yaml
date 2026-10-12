@@ -258,7 +258,8 @@ stimuli:
   - name: Stay dormant for a plain Blazor component request
     prompt: |
       Build a reusable Blazor confirmation dialog component with confirm and cancel callbacks. Use only built-in Blazor APIs and include a small usage example.
-    expect_activation: false
+    tags:
+      expect_activation: "false"
     graders:
       - type: prompt
     rubric:
