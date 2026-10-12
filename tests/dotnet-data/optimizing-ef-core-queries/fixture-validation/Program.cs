@@ -338,6 +338,23 @@ static async Task CheckCleanDataAccess()
         Status = "Open"
     });
     db.Invoices.Add(new Invoice { Id = 1, TenantId = 7, CustomerId = 1, Amount = 15 });
+    db.AuditEntries.AddRange(
+        new AuditEntry
+        {
+            Id = 1,
+            TenantId = 7,
+            CreatedAt = new DateTime(2026, 10, 2),
+            Category = "Billing",
+            Notes = "Expected"
+        },
+        new AuditEntry
+        {
+            Id = 2,
+            TenantId = 7,
+            CreatedAt = new DateTime(2026, 10, 3),
+            Category = "Operations",
+            Notes = "Excluded"
+        });
     await db.SaveChangesAsync();
     db.ChangeTracker.Clear();
 
@@ -349,6 +366,10 @@ static async Task CheckCleanDataAccess()
         "The keyset page must preserve its ordered row.");
     Require(await service.BuildSnapshotAsync(1, default) == new BillingSnapshot(1, 15),
         "Sequential scalar queries must preserve both snapshot values.");
+    var auditEntries = await service.GetAuditCategoryAsync("Billing", default);
+    Require(auditEntries.Select(entry => entry.Id).SequenceEqual(new long[] { 1 }) &&
+        auditEntries[0].Category == "Billing",
+        "The parameterized audit query must return only the requested category.");
     Require((await service.GetReviewBatchAsync(7, default)).Count == 1,
         "The bounded review batch must include the unreviewed order.");
     await service.MarkReviewedAsync(7, new[] { 1 }, default);

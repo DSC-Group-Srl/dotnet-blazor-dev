@@ -174,10 +174,111 @@ stimuli:
       path: references/customer-detail-split.patch
     graders:
       - *benchmark-harness-integrity
-      - type: file-contains
+      - type: run-command
         config:
-          path: SalesOperationsService.cs
-          value: AsSplitQuery
+          command: node
+          args:
+            - -e
+            - &single-method-scope-script |
+              const crypto = require("crypto");
+              const fs = require("fs");
+              const path = require("path");
+              const [method, expected] = process.argv.slice(1);
+              const source = fs.readFileSync("SalesOperationsService.cs", "utf8").replace(/\r\n/g, "\n");
+              const match = new RegExp("^\\s*public\\s+[^\\r\\n]*\\b" + method + "\\s*\\(", "m").exec(source);
+              if (!match) throw new Error("Method not found: " + method);
+              const open = source.indexOf("{", match.index);
+              if (open < 0) throw new Error("Method body not found: " + method);
+              let depth = 0;
+              let end = -1;
+              for (let i = open; i < source.length; i++) {
+                if (source.startsWith("//", i)) {
+                  i = source.indexOf("\n", i);
+                  if (i < 0) break;
+                  continue;
+                }
+                if (source.startsWith("/*", i)) {
+                  i = source.indexOf("*/", i + 2);
+                  if (i < 0) throw new Error("Unterminated block comment");
+                  i++;
+                  continue;
+                }
+                if (source[i] === "\"") {
+                  let quotes = 1;
+                  while (source[i + quotes] === "\"") quotes++;
+                  if (quotes >= 3) {
+                    const delimiter = "\"".repeat(quotes);
+                    i = source.indexOf(delimiter, i + quotes);
+                    if (i < 0) throw new Error("Unterminated raw string");
+                    i += quotes - 1;
+                    continue;
+                  }
+                  const verbatim = (i > 0 && source[i - 1] === "@") ||
+                    (i > 1 && source[i - 2] === "@" && source[i - 1] === "$");
+                  for (i++; i < source.length; i++) {
+                    if (verbatim && source[i] === "\"" && source[i + 1] === "\"") {
+                      i++;
+                    } else if (!verbatim && source[i] === "\\") {
+                      i++;
+                    } else if (source[i] === "\"") {
+                      break;
+                    }
+                  }
+                  continue;
+                }
+                if (source[i] === "'") {
+                  for (i++; i < source.length; i++) {
+                    if (source[i] === "\\") i++;
+                    else if (source[i] === "'") break;
+                  }
+                  continue;
+                }
+                if (source[i] === "{") depth++;
+                else if (source[i] === "}" && --depth === 0) {
+                  end = i + 1;
+                  break;
+                }
+              }
+              if (end < 0) throw new Error("Method end not found: " + method);
+              const masked = source.slice(0, match.index) + "\n/* requested method */\n" + source.slice(end);
+              const actual = crypto.createHash("sha256").update(masked).digest("hex");
+              if (actual !== expected) {
+                throw new Error("SalesOperationsService.cs changed outside " + method);
+              }
+              const expectedFiles = new Set([
+                "SalesOperationsService.cs",
+                "perf/Baseline.cs",
+                "perf/Program.cs",
+                "perf/SalesBenchmarks.csproj",
+                "perf/Seed.cs",
+                "perf/Timing.cs"
+              ]);
+              const skillDirectory = "optimizing-ef-core-queries";
+              const skillPath = skillDirectory + "/SKILL.md";
+              if (fs.existsSync(skillDirectory)) {
+                if (!fs.existsSync(skillPath)) throw new Error("Target skill file was removed");
+                expectedFiles.add(skillPath);
+                const skill = fs.readFileSync(skillPath, "utf8").replace(/\r\n/g, "\n");
+                const skillHash = crypto.createHash("sha256").update(skill).digest("hex");
+                if (skillHash !== "a4c0d87d624f3ac1e291db0e613026815ee3247f5414ece17fd3b45600943ff7") {
+                  throw new Error("Target skill file was modified");
+                }
+              }
+              const ignoredPrefixes = [".git/", "perf/bin/", "perf/obj/"];
+              const unexpected = [];
+              const walk = directory => {
+                for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                  const full = path.join(directory, entry.name);
+                  const relative = path.relative(".", full).replaceAll("\\", "/");
+                  if (ignoredPrefixes.some(prefix => relative.startsWith(prefix))) continue;
+                  if (entry.isDirectory()) walk(full);
+                  else if (!expectedFiles.has(relative)) unexpected.push(relative);
+                }
+              };
+              walk(".");
+              if (unexpected.length) throw new Error("Unexpected workspace files: " + unexpected.join(", "));
+            - GetCustomerDetail
+            - "b8c555a3cdf1c9cefa31d8fe77daaf22e89e85896133c129b020f0cff9a5f626"
       - type: run-command
         config:
           command: dotnet
@@ -218,6 +319,14 @@ stimuli:
       - *benchmark-harness-integrity
       - type: run-command
         config:
+          command: node
+          args:
+            - -e
+            - *single-method-scope-script
+            - GetPendingOrders
+            - "bb4639d504b0adc53079dad72a07b97937d52f8be4ac6454d35ca862ec4518a3"
+      - type: run-command
+        config:
           command: dotnet
           args: [run, -c, Release, --project, perf, --, --method, GetPendingOrders]
           expected_exit_code: 0
@@ -254,10 +363,14 @@ stimuli:
       path: references/category-discount-bulk.patch
     graders:
       - *benchmark-harness-integrity
-      - type: file-contains
+      - type: run-command
         config:
-          path: SalesOperationsService.cs
-          value: ExecuteUpdate
+          command: node
+          args:
+            - -e
+            - *single-method-scope-script
+            - ApplyCategoryDiscount
+            - "3e929e200f296f77dd283f20e394927e7f4d6b7bb198885e21313f6e37ebdf9b"
       - type: run-command
         config:
           command: dotnet
@@ -717,7 +830,6 @@ stimuli:
           pattern: (AsNoTracking|AsSplitQuery|Include\()
       - type: prompt
     rubric:
-      - The optimizing-ef-core-queries skill stayed dormant because the repository uses Dapper
       - Recognized that the EF Core-specific guidance does not apply to a Dapper repository
       - Kept the Dapper data-access stack and did not introduce EF Core
       - Explained that a leading wildcard prevents a normal index seek
