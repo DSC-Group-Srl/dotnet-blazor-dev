@@ -159,7 +159,18 @@ stimuli:
       capability: avoid-cartesian-collection-join
       risk: high
       journey: optimize-customer-detail
-    environment: *query-environment
+    environment: &focused-query-environment
+      files:
+        - src: audit-fixtures/SalesOperationsService.cs
+          dest: SalesOperationsService.cs
+        - src: benchmark-fixtures
+          dest: perf
+      commands:
+        - >-
+          node -e "const crypto=require('crypto'),fs=require('fs');
+          const state=fs.existsSync('optimizing-ef-core-queries/SKILL.md')?'present':'absent';
+          const signature=crypto.createHmac('sha256','5f077eb03a9c1cb3528e0236e72b425f992db5b8321ca75dd7afcc6103ecc6f3').update(state).digest('hex');
+          fs.writeFileSync('.eval-scope-state',state+':'+signature+'\n')"
     golden_trajectory:
       inline:
         schema_version: "ATIF-v1.6"
@@ -240,12 +251,13 @@ stimuli:
                 }
               }
               if (end < 0) throw new Error("Method end not found: " + method);
-              const masked = source.slice(0, match.index) + "\n/* requested method */\n" + source.slice(end);
+              const masked = source.slice(0, open + 1) + "\n/* requested method body */\n" + source.slice(end - 1);
               const actual = crypto.createHash("sha256").update(masked).digest("hex");
               if (actual !== expected) {
                 throw new Error("SalesOperationsService.cs changed outside " + method);
               }
               const expectedFiles = new Set([
+                ".eval-scope-state",
                 "SalesOperationsService.cs",
                 "perf/Baseline.cs",
                 "perf/Program.cs",
@@ -253,9 +265,18 @@ stimuli:
                 "perf/Seed.cs",
                 "perf/Timing.cs"
               ]);
+              const marker = fs.readFileSync(".eval-scope-state", "utf8").trim().split(":");
+              if (marker.length !== 2) throw new Error("Invalid scope-state marker");
+              const [skillState, markerSignature] = marker;
+              const expectedSignature = crypto
+                .createHmac("sha256", "5f077eb03a9c1cb3528e0236e72b425f992db5b8321ca75dd7afcc6103ecc6f3")
+                .update(skillState)
+                .digest("hex");
+              if (markerSignature !== expectedSignature) throw new Error("Scope-state marker was modified");
               const skillDirectory = "optimizing-ef-core-queries";
               const skillPath = skillDirectory + "/SKILL.md";
-              if (fs.existsSync(skillDirectory)) {
+              if (skillState === "present") {
+                if (!fs.existsSync(skillDirectory)) throw new Error("Target skill directory was removed");
                 if (!fs.existsSync(skillPath)) throw new Error("Target skill file was removed");
                 expectedFiles.add(skillPath);
                 const skill = fs.readFileSync(skillPath, "utf8").replace(/\r\n/g, "\n");
@@ -263,6 +284,10 @@ stimuli:
                 if (skillHash !== "a4c0d87d624f3ac1e291db0e613026815ee3247f5414ece17fd3b45600943ff7") {
                   throw new Error("Target skill file was modified");
                 }
+              } else if (skillState === "absent") {
+                if (fs.existsSync(skillDirectory)) throw new Error("Unexpected target skill directory");
+              } else {
+                throw new Error("Invalid scope-state marker value");
               }
               const ignoredPrefixes = [".git/", "perf/bin/", "perf/obj/"];
               const unexpected = [];
@@ -278,7 +303,7 @@ stimuli:
               walk(".");
               if (unexpected.length) throw new Error("Unexpected workspace files: " + unexpected.join(", "));
             - GetCustomerDetail
-            - "b8c555a3cdf1c9cefa31d8fe77daaf22e89e85896133c129b020f0cff9a5f626"
+            - "0193938430a00031e0099adc5ffdfc47125823ed37aaf30ccb67f28c66fa3da7"
       - type: run-command
         config:
           command: dotnet
@@ -302,7 +327,7 @@ stimuli:
       capability: server-filter-with-index-recommendation
       risk: high
       journey: optimize-fulfillment-queue
-    environment: *query-environment
+    environment: *focused-query-environment
     golden_trajectory:
       inline:
         schema_version: "ATIF-v1.6"
@@ -324,7 +349,7 @@ stimuli:
             - -e
             - *single-method-scope-script
             - GetPendingOrders
-            - "bb4639d504b0adc53079dad72a07b97937d52f8be4ac6454d35ca862ec4518a3"
+            - "3ace38295cf8c084d5b615eb532b3e52ee2e44e3e32ec63bc617a018150c1e6c"
       - type: run-command
         config:
           command: dotnet
@@ -348,7 +373,7 @@ stimuli:
       capability: use-set-based-bulk-update
       risk: high
       journey: optimize-nightly-maintenance
-    environment: *query-environment
+    environment: *focused-query-environment
     golden_trajectory:
       inline:
         schema_version: "ATIF-v1.6"
@@ -370,7 +395,7 @@ stimuli:
             - -e
             - *single-method-scope-script
             - ApplyCategoryDiscount
-            - "3e929e200f296f77dd283f20e394927e7f4d6b7bb198885e21313f6e37ebdf9b"
+            - "d4f075f06adb0119c6eca5533955b5bd593146275e98d3418807a85c71874a45"
       - type: run-command
         config:
           command: dotnet
