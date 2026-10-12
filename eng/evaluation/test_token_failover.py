@@ -738,6 +738,10 @@ class TokenFailoverTests(unittest.TestCase):
             "Dashboard contains an in-flight row without valid identity markers",
             health_lock_text,
         )
+        self.assertIn(
+            "hasPersistedState &&",
+            health_lock_text,
+        )
         self.assertIn("legacyFingerprintMatch", health_lock_text)
         self.assertIn(
             "priorOutbox.get(dispatch.finding_id)?.correlation",
