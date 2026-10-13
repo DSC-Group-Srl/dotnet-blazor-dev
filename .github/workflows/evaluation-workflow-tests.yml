@@ -109,8 +109,8 @@ jobs:
           node_modules/.bin/copilot --version
           node --input-type=module -e "import.meta.resolve('@github/copilot-linux-x64/sdk')"
 
-      - name: Lint full eval corpus
-        run: eng/evaluation-tools/node_modules/.bin/vally lint --eval-spec tests
+      - name: Validate full eval corpus
+        run: node eng/evaluation-tools/lint-corpus.mjs tests
 
       - name: Test SDK startup ordering without model calls
         run: node --test eng/evaluation-tools/*.test.mjs

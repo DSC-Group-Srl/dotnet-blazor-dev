@@ -2156,9 +2156,11 @@ esac
             "import.meta.resolve('@github/copilot-linux-x64/sdk')",
             smoke_script,
         )
-        corpus_lint = steps["Lint full eval corpus"]["run"]
-        self.assertIn("node_modules/.bin/vally lint", corpus_lint)
-        self.assertIn("--eval-spec tests", corpus_lint)
+        corpus_lint = steps["Validate full eval corpus"]["run"]
+        self.assertEqual(
+            corpus_lint,
+            "node eng/evaluation-tools/lint-corpus.mjs tests",
+        )
 
     def test_path_safety_helper_changes_run_workflow_tests(self) -> None:
         workflow = yaml.safe_load(TEST_WORKFLOW.read_text(encoding="utf-8"))
