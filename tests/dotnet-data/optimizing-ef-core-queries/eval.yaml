@@ -54,6 +54,21 @@ stimuli:
               const fs = require("fs");
               const path = require("path");
               const names = ["Baseline.cs", "Program.cs", "SalesBenchmarks.csproj", "Seed.cs", "Timing.cs"];
+              const expected = new Set(names);
+              const unexpected = [];
+              const walk = directory => {
+                for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                  const full = path.join(directory, entry.name);
+                  const relative = path.relative("perf", full).replaceAll("\\", "/");
+                  if (relative.startsWith("bin/") || relative.startsWith("obj/")) continue;
+                  if (entry.isDirectory()) walk(full);
+                  else if (!expected.has(relative)) unexpected.push(relative);
+                }
+              };
+              walk("perf");
+              if (unexpected.length) {
+                throw new Error("Unexpected benchmark files: " + unexpected.join(", "));
+              }
               const hash = crypto.createHash("sha256");
               for (const name of names) {
                 hash.update(name); hash.update(Buffer.from([0]));
