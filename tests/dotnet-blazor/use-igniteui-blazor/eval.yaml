@@ -127,7 +127,7 @@ stimuli:
           substring: IgniteUI.Blazor.GridLite
       - type: output-matches
         config:
-          pattern: '_content/IgniteUI\.Blazor\.GridLite/themes/'
+          pattern: '_content/IgniteUI\.Blazor\.GridLite/themes/(?:light|dark)/(?:bootstrap|material|fluent|indigo)\.css'
       - type: output-not-matches
         config:
           pattern: '_content/IgniteUI\.Blazor\.GridLite/css/themes/'
