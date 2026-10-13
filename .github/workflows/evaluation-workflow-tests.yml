@@ -28,6 +28,7 @@ on:
       - "eng/dashboard/**"
       - "eng/vally-adapter/**"
       - "eng/skill-validator/src/**"
+      - "tests/**/eval.yaml"
   push:
     branches: [main]
     paths:
@@ -56,6 +57,7 @@ on:
       - "eng/dashboard/**"
       - "eng/vally-adapter/**"
       - "eng/skill-validator/src/**"
+      - "tests/**/eval.yaml"
   workflow_dispatch:
 
 permissions:

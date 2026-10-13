@@ -832,6 +832,34 @@ test("dormancy parser reads a zero-indent stimuli sequence", () => {
   }
 });
 
+test("dormancy parser treats equivalent nested tag indentation identically", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-indent-"));
+  try {
+    const evalLines = (expectActivationIndent) => [
+      "stimuli:",
+      "  - name: Dormant",
+      "    tags:",
+      `${" ".repeat(expectActivationIndent)}expect_activation: "false"`,
+      "  - name: Active",
+      "    tags:",
+      `${" ".repeat(expectActivationIndent)}expect_activation: "true"`,
+      "",
+    ].join("\n");
+    writeFileSync(
+      join(root, "two-space.yaml"),
+      evalLines(6),
+    );
+    writeFileSync(join(root, "four-space.yaml"), evalLines(8));
+
+    const conventional = readNonActivationStimuli("two-space.yaml", root);
+    const deeper = readNonActivationStimuli("four-space.yaml", root);
+    assert.deepEqual([...deeper], [...conventional]);
+    assert.deepEqual([...deeper], ["Dormant"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("dormancy parser reads flow-mapping stimuli", () => {
   const root = mkdtempSync(join(tmpdir(), "vally-dormancy-flow-"));
   try {

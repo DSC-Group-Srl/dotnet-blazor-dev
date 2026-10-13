@@ -28,12 +28,17 @@ export function discoverEvalSpecs(root, cwd = process.cwd()) {
 }
 
 export function reportedEvalSpecs(output) {
-  const specs = new Set();
+  return [...new Set(reportedEvalSpecOccurrences(output))].sort();
+}
+
+function reportedEvalSpecOccurrences(output) {
+  const specs = [];
   const cleanOutput = output.replace(ansiPattern, '');
-  for (const match of cleanOutput.matchAll(/^Eval:\s+(.+?eval\.yaml)\s*$/gmi)) {
-    specs.add(normalizePath(match[1].trim()));
+  for (const line of cleanOutput.split(/\r?\n/)) {
+    const match = /^(?:Eval:\s+|✔\s+)(.+?eval\.yaml)(?:\s+is valid)?\s*$/i.exec(line);
+    if (match) specs.push(normalizePath(match[1].trim()));
   }
-  return [...specs].sort();
+  return specs;
 }
 
 export function validateCorpusLint({
@@ -62,16 +67,24 @@ export function validateCorpusLint({
     throw new Error(`Vally corpus lint failed with exit code ${result.status}.`);
   }
 
-  const reported = reportedEvalSpecs(`${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+  const occurrences = reportedEvalSpecOccurrences(output);
+  const reported = [...new Set(occurrences)].sort();
   const expectedSet = new Set(expected);
   const reportedSet = new Set(reported);
   const missing = expected.filter(path => !reportedSet.has(path));
   const unexpected = reported.filter(path => !expectedSet.has(path));
+  const counts = new Map();
+  for (const path of occurrences) counts.set(path, (counts.get(path) ?? 0) + 1);
+  const duplicates = [...counts]
+    .filter(([, count]) => count > 1)
+    .map(([path, count]) => `${path} (${count})`);
 
-  if (missing.length > 0 || unexpected.length > 0) {
+  if (missing.length > 0 || unexpected.length > 0 || duplicates.length > 0) {
     const details = [
       missing.length > 0 ? `Missing (${missing.length}): ${missing.join(', ')}` : null,
       unexpected.length > 0 ? `Unexpected (${unexpected.length}): ${unexpected.join(', ')}` : null,
+      duplicates.length > 0 ? `Duplicate reports (${duplicates.length}): ${duplicates.join(', ')}` : null,
     ].filter(Boolean).join('\n');
     throw new Error(
       `Vally reported ${reported.length}/${expected.length} discovered eval specs.\n${details}`,

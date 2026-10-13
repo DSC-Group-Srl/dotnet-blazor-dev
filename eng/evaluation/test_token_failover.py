@@ -2134,6 +2134,10 @@ esac
         tool_path = "eng/evaluation-tools/**"
         for event in ("pull_request", "push"):
             self.assertEqual(triggers[event]["paths"].count(tool_path), 1)
+            self.assertEqual(
+                triggers[event]["paths"].count("tests/**/eval.yaml"),
+                1,
+            )
 
         job = workflow["jobs"]["evaluation-tools"]
         self.assertEqual(job["runs-on"], "ubuntu-latest")

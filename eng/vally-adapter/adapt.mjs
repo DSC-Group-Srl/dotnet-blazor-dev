@@ -317,6 +317,7 @@ function readNonActivationStimuli(evalFile, repoRoot) {
   let itemDashIndent = null; // indent of each stimulus item's leading dash
   let keyIndent = null; // column where an item's mapping keys begin
   let tagsIndent = null;
+  let inTagsBlock = false;
   let curName = null;
   let curNonActivation = false;
   const flush = () => {
@@ -358,6 +359,7 @@ function readNonActivationStimuli(evalFile, repoRoot) {
       const rest = dash[2];
       keyIndent = line.length - rest.length;
       tagsIndent = null;
+      inTagsBlock = false;
       const flowEntries = flowMappingEntries(rest);
       if (flowEntries) {
         for (const entry of flowEntries) {
@@ -384,15 +386,17 @@ function readNonActivationStimuli(evalFile, repoRoot) {
     if (keyIndent !== null && ind === keyIndent) {
       const kv = /^([A-Za-z0-9_]+):\s?(.*)$/.exec(line.slice(keyIndent));
       if (kv) {
-        tagsIndent = kv[1] === "tags" && !applyTags(kv[2])
-          ? keyIndent + 2
-          : null;
+        inTagsBlock = kv[1] === "tags" && !applyTags(kv[2]);
+        tagsIndent = null;
         if (kv[1] !== "tags") applyKey(kv[1], kv[2]);
         skipBlockScalar(kv[2]);
       }
-    } else if (tagsIndent !== null && ind === tagsIndent) {
-      const kv = /^([A-Za-z0-9_]+):\s?(.*)$/.exec(line.slice(tagsIndent));
-      if (kv) applyKey(kv[1], kv[2]);
+    } else if (inTagsBlock && keyIndent !== null && ind > keyIndent) {
+      tagsIndent ??= ind;
+      if (ind === tagsIndent) {
+        const kv = /^([A-Za-z0-9_]+):\s?(.*)$/.exec(line.slice(tagsIndent));
+        if (kv) applyKey(kv[1], kv[2]);
+      }
     }
   }
   flush();
