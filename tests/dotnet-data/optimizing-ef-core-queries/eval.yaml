@@ -74,7 +74,7 @@ stimuli:
                 hash.update(name); hash.update(Buffer.from([0]));
                 hash.update(fs.readFileSync(path.join("perf", name))); hash.update(Buffer.from([0]));
               }
-              process.exit(hash.digest("hex") === "dd69d975158aa28143e650fcdee1b8e556e6222f11f69a19c7817ec19c251187" ? 0 : 1);
+              process.exit(hash.digest("hex") === "e7662ebe5a6b8b0dab5c9bd66e234275d74a982d11a4cedda1207fddaa6ab7fc" ? 0 : 1);
           expected_exit_code: 0
       - type: output-matches
         config:

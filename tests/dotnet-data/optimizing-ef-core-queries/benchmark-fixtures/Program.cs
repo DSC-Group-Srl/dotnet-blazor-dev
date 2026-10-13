@@ -166,13 +166,13 @@ internal static class Program
 
     private static Result BenchGetOrdersOverTotal() => BenchRead(
         Seed.Orders,
-        db => CanonOrderRows(new BaselineSalesOperationsService(db).GetOrdersOverTotal(Seed.MinTotal)),
-        db => CanonOrderRows(new SalesOperationsService(db).GetOrdersOverTotal(Seed.MinTotal)));
+        db => CanonOrderRowsUnordered(new BaselineSalesOperationsService(db).GetOrdersOverTotal(Seed.MinTotal)),
+        db => CanonOrderRowsUnordered(new SalesOperationsService(db).GetOrdersOverTotal(Seed.MinTotal)));
 
     private static Result BenchGetPendingOrders() => BenchRead(
         Seed.Orders,
-        db => CanonOrderRows(new BaselineSalesOperationsService(db).GetPendingOrders()),
-        db => CanonOrderRows(new SalesOperationsService(db).GetPendingOrders()));
+        db => CanonOrderRowsOrdered(new BaselineSalesOperationsService(db).GetPendingOrders()),
+        db => CanonOrderRowsOrdered(new SalesOperationsService(db).GetPendingOrders()));
 
     private static Result BenchSearchProducts() => BenchRead(
         Seed.Products,
@@ -356,8 +356,24 @@ internal static class Program
             .OrderBy(r => r.CustomerName, StringComparer.Ordinal)
             .Select(r => $"{r.CustomerName}:{r.OrderCount}:{Money(r.Revenue)}"));
 
-    private static string CanonDetail(Customer c) =>
-        $"orders={c.Orders.Count};lines={c.Orders.Sum(o => o.Lines.Count)};invoices={c.Invoices.Count};revenue={Money(c.Orders.Sum(o => o.Total))}";
+    private static string CanonDetail(Customer c)
+    {
+        var orders = string.Join(";", c.Orders
+            .OrderBy(o => o.Id)
+            .Select(o =>
+            {
+                var lines = string.Join(",", o.Lines
+                    .OrderBy(line => line.Id)
+                    .Select(line =>
+                        $"{line.Id}:{line.OrderId}:{line.Sku}:{line.Quantity}:{Money(line.UnitPrice)}"));
+                return $"{o.Id}:{o.CustomerId}:{o.CreatedAt.Ticks}:{Money(o.Total)}:{o.Status}:[{lines}]";
+            }));
+        var invoices = string.Join(";", c.Invoices
+            .OrderBy(invoice => invoice.Id)
+            .Select(invoice =>
+                $"{invoice.Id}:{invoice.CustomerId}:{Money(invoice.Amount)}:{invoice.Paid}"));
+        return $"{c.Id}:{c.Name}:{c.Region}|orders=[{orders}]|invoices=[{invoices}]";
+    }
 
     private static string CanonInvoices(List<Invoice> invoices) =>
         $"count={invoices.Count};amount={Money(invoices.Sum(i => i.Amount))}";
@@ -365,19 +381,26 @@ internal static class Program
     private static string CanonCards(List<ProductCard> cards) =>
         string.Join("|", cards.OrderBy(c => c.Id).Select(CanonCard));
 
-    private static string CanonOrderRows(List<OrderRow> rows) =>
+    private static string CanonOrderRowsUnordered(List<OrderRow> rows) =>
         string.Join("|", rows
             .OrderBy(r => r.OrderId)
             .Select(r => $"{r.OrderId}:{r.CreatedAt.Ticks}:{Money(r.Total)}"));
+
+    private static string CanonOrderRowsOrdered(List<OrderRow> rows) =>
+        string.Join("|", rows.Select(r => $"{r.OrderId}:{r.CreatedAt.Ticks}:{Money(r.Total)}"));
 
     private static string CanonCard(ProductCard c) => $"{c.Id}:{c.Name}:{Money(c.Price)}";
 
     private static string CanonPrices(SalesDbContext db) =>
         string.Join("|", db.Products
             .OrderBy(p => p.Id)
-            .Select(p => new { p.CategoryId, p.Price, p.UpdatedAt })
+            .Select(p => new { p.Id, p.CategoryId, p.Price, p.UpdatedAt })
             .ToList()
-            .Select(p => $"{p.CategoryId}:{Money(p.Price)}:{(p.UpdatedAt != new DateTime(2024, 1, 1) ? 1 : 0)}"));
+            .Select(p =>
+                $"{p.Id}:{p.CategoryId}:{Money(p.Price)}:{(p.UpdatedAt != SeedProductUpdatedAt(p.Id) ? 1 : 0)}"));
+
+    private static DateTime SeedProductUpdatedAt(int id) =>
+        new DateTime(2024, 1, 1).AddMinutes(id);
 
     private sealed class CommandShapeCounter : DbCommandInterceptor
     {
