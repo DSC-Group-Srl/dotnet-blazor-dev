@@ -632,6 +632,36 @@ def explicit_regex_flags_are_honored(d):
         ]), f)
 
 
+def nested_regex_flags_are_rejected(d):
+    eval_path = EV(d)
+    with open(eval_path) as f:
+        raw = f.read()
+    with open(eval_path, "w") as f:
+        f.write(raw.replace(
+            "    rubric:\n",
+            "    graders:\n"
+            "      - type: output-matches\n"
+            "        config:\n"
+            "          pattern: (?is)start(?m)^line$\n"
+            "    rubric:\n",
+            1))
+
+
+def conditional_regex_groups_are_rejected(d):
+    eval_path = EV(d)
+    with open(eval_path) as f:
+        raw = f.read()
+    with open(eval_path, "w") as f:
+        f.write(raw.replace(
+            "    rubric:\n",
+            "    graders:\n"
+            "      - type: output-matches\n"
+            "        config:\n"
+            "          pattern: (?i)(a)?value(?(1)a)\n"
+            "    rubric:\n",
+            1))
+
+
 def regex_negate_overrides_grader_type(d):
     transcript_grader_with_trajectory(d)
     eval_path = EV(d)
@@ -1442,6 +1472,33 @@ def vally_schema_alias_migration_with_semantic_change(d):
         f.write(content.replace("prompt: do it", "prompt: do it differently", 1))
 
 
+def vally_regex_migration(d):
+    path = EV(d)
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    legacy = content.replace(
+        "    rubric:\n",
+        "    graders:\n"
+        "      - type: output-matches\n"
+        "        config:\n"
+        "          pattern: (?i)--filter-method\\s+(?<quote>[\"'])?"
+        "(?:\\*Checkout_AppliesCoupon\\*?|(?:[\\w.]+\\.)?"
+        "CheckoutTests\\.Checkout_AppliesCoupon)(?(quote)\\k<quote>)(?=\\s|$)\n"
+        "    rubric:\n",
+        1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(legacy)
+    subprocess.run(["git", "add", "-A"], cwd=d, check=True)
+    subprocess.run(["git", "commit", "-qm", "legacy vally regex"], cwd=d, check=True)
+
+    current = legacy.replace(
+        "(?(quote)\\k<quote>)",
+        "\\k<quote>",
+        1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(current)
+
+
 def preexisting_deprecated_config_with_unrelated_change(d):
     path = EV(d)
     with open(path) as f:
@@ -1887,6 +1944,10 @@ results = [
          unflagged_regex_is_not_multiline, expect_fail=True),
     case("explicit output regex flags are honored",
          explicit_regex_flags_are_honored, expect_fail=False),
+    case("nested output regex flags are rejected",
+         nested_regex_flags_are_rejected, expect_fail=True),
+    case("conditional output regex groups are rejected",
+         conditional_regex_groups_are_rejected, expect_fail=True),
     case("regex negate overrides the grader type",
          regex_negate_overrides_grader_type, expect_fail=False),
     case("contains case and negate settings are honored",
@@ -1990,6 +2051,10 @@ results = [
                 gate_args=("--base-ref", "HEAD")),
     output_case("removed Vally aliases migrate without semantic scope",
                 vally_schema_alias_migration,
+                "enforced 0 changed eval suite(s) of 1 total against HEAD",
+                gate_args=("--base-ref", "HEAD")),
+    output_case("removed Vally regex forms migrate without semantic scope",
+                vally_regex_migration,
                 "enforced 0 changed eval suite(s) of 1 total against HEAD",
                 gate_args=("--base-ref", "HEAD")),
     output_case("schema migration plus semantic edit remains enforced",

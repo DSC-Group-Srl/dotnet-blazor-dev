@@ -387,7 +387,7 @@ def is_execution_shard_metadata_only_change(
 
 
 def _normalize_vally_schema_migration(doc: dict) -> dict:
-    """Canonicalize removed Vally aliases to their supported equivalents."""
+    """Canonicalize removed Vally forms to their supported equivalents."""
     normalized = copy.deepcopy(doc)
     if "config" in normalized and "defaults" not in normalized:
         normalized["defaults"] = normalized.pop("config")
@@ -401,6 +401,14 @@ def _normalize_vally_schema_migration(doc: dict) -> dict:
         for key in ("expect_activation", "deny_shell"):
             if key in stimulus:
                 tags[key] = str(stimulus.pop(key)).lower()
+
+        for grader in stimulus.get("graders") or []:
+            if not isinstance(grader, dict) or grader.get("type") not in (
+                    "output-matches", "output-not-matches"):
+                continue
+            config = grader.get("config")
+            if isinstance(config, dict) and isinstance(config.get("pattern"), str):
+                config["pattern"] = _normalize_vally_regex_migration(config["pattern"])
 
         constraints = stimulus.get("constraints")
         if not isinstance(constraints, dict):
@@ -426,6 +434,55 @@ def _normalize_vally_schema_migration(doc: dict) -> dict:
     return normalized
 
 
+LEGACY_FILTER_METHOD_REGEX = (
+    r"""(?i)--filter-method\s+(?<quote>["'])?(?:\*Checkout_AppliesCoupon\*?|"""
+    r"""(?:[\w.]+\.)?CheckoutTests\.Checkout_AppliesCoupon)"""
+    r"""(?(quote)\k<quote>)(?=\s|$)""")
+VALLY_FILTER_METHOD_REGEX = (
+    r"""(?i)--filter-method\s+(?<quote>["'])?(?:\*Checkout_AppliesCoupon\*?|"""
+    r"""(?:[\w.]+\.)?CheckoutTests\.Checkout_AppliesCoupon)"""
+    r"""\k<quote>(?=\s|$)""")
+LEGACY_HOT_RELOAD_ENV_REGEX = (
+    r"""(?is)(?:(?m)^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?`?dotnet\s+run\b.{0,500}"""
+    r"""TESTINGPLATFORM_HOTRELOAD_ENABLED\s*=\s*["']?1["']?(?!\d)|"""
+    r"""(?m)^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?(?:`?(?:\$env:|export\s+|set\s+)?"""
+    r"""TESTINGPLATFORM_HOTRELOAD_ENABLED\s*=\s*["']?1["']?).{0,500}"""
+    r"""^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?`?dotnet\s+run\b|"""
+    r"""(?m)^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?`?"""
+    r"""TESTINGPLATFORM_HOTRELOAD_ENABLED\s*=\s*["']?1["']?\s+`?dotnet\s+run\b)""")
+VALLY_HOT_RELOAD_ENV_REGEX = LEGACY_HOT_RELOAD_ENV_REGEX.replace(
+    "(?is)(?:(?m)", "(?ims)(?:", 1).replace("|(?m)", "|")
+VALLY_REGEX_MIGRATIONS = {
+    LEGACY_FILTER_METHOD_REGEX: VALLY_FILTER_METHOD_REGEX,
+    LEGACY_HOT_RELOAD_ENV_REGEX: VALLY_HOT_RELOAD_ENV_REGEX,
+}
+
+
+def _normalize_vally_regex_migration(pattern: str) -> str:
+    """Canonicalize the reviewed Vally 0.18 JavaScript regex migrations."""
+    return VALLY_REGEX_MIGRATIONS.get(pattern, pattern)
+
+
+def _has_legacy_vally_regexes(doc: object) -> bool:
+    """Return whether an eval uses regex constructs rejected by JavaScript RegExp."""
+    if not isinstance(doc, dict):
+        return False
+    for stimulus in doc.get("stimuli") or []:
+        if not isinstance(stimulus, dict):
+            continue
+        for grader in stimulus.get("graders") or []:
+            if not isinstance(grader, dict) or grader.get("type") not in (
+                    "output-matches", "output-not-matches"):
+                continue
+            config = grader.get("config")
+            pattern = config.get("pattern") if isinstance(config, dict) else None
+            if not isinstance(pattern, str):
+                continue
+            if pattern in VALLY_REGEX_MIGRATIONS:
+                return True
+    return False
+
+
 def _has_removed_vally_aliases(doc: object) -> bool:
     """Return whether a parsed eval still contains aliases removed by Vally."""
     if not isinstance(doc, dict):
@@ -448,7 +505,7 @@ def _has_removed_vally_aliases(doc: object) -> bool:
 
 def is_vally_schema_migration_only_change(
         spec: str, base_ref: str, changed_paths: set[str]) -> bool:
-    """Return true when an eval changed only to replace removed Vally aliases."""
+    """Return true when an eval changed only to replace removed Vally forms."""
     suite_prefix = spec.rsplit("/", 1)[0] + "/"
     affected = {
         path for path in changed_paths
@@ -470,9 +527,17 @@ def is_vally_schema_migration_only_change(
     except (FileNotFoundError, OSError, yaml.YAMLError):
         return False
 
-    return (
+    base_has_legacy = (
         _has_removed_vally_aliases(base_doc)
-        and not _has_removed_vally_aliases(current_doc)
+        or _has_legacy_vally_regexes(base_doc)
+    )
+    current_has_legacy = (
+        _has_removed_vally_aliases(current_doc)
+        or _has_legacy_vally_regexes(current_doc)
+    )
+    return (
+        base_has_legacy
+        and not current_has_legacy
         and _normalize_vally_schema_migration(base_doc)
         == _normalize_vally_schema_migration(current_doc)
     )
@@ -1003,8 +1068,8 @@ def _validate_atif_trajectory(document, path: str = "", *, embedded: bool = Fals
             seen.add(trajectory_id)
 
 
-def vally_regex_found(pattern: str, output: str) -> bool:
-    """Match Vally's leading inline-flag convention for JavaScript regexes."""
+def vally_regex_parts(pattern: str) -> tuple[str, int]:
+    """Parse Vally's leading flags and reject constructs JavaScript cannot compile."""
     flags = 0
     inline = re.match(r"^\(\?([ims]+)\)", pattern)
     if inline:
@@ -1018,6 +1083,25 @@ def vally_regex_found(pattern: str, output: str) -> bool:
         if "s" in names:
             flags |= re.DOTALL
         pattern = pattern[inline.end():]
+    if re.search(r"(?<!\\)\(\?[ims]+\)", pattern):
+        raise re.error(
+            "inline regex flags must appear once at the start for JavaScript RegExp")
+    if re.search(r"(?<!\\)\(\?\(", pattern):
+        raise re.error("conditional groups are not supported by JavaScript RegExp")
+    return pattern, flags
+
+
+def vally_regex_found(pattern: str, output: str) -> bool:
+    """Match Vally's leading inline-flag convention for JavaScript regexes."""
+    pattern, flags = vally_regex_parts(pattern)
+    pattern = re.sub(
+        r"(?<!\\)\(\?<([A-Za-z_][A-Za-z0-9_]*)>",
+        r"(?P<\1>",
+        pattern)
+    pattern = re.sub(
+        r"\\k<([A-Za-z_][A-Za-z0-9_]*)>",
+        r"(?P=\1)",
+        pattern)
     return re.search(pattern, output, flags) is not None
 
 
@@ -1417,6 +1501,13 @@ def check_graders(spec: str, doc: dict) -> None:
                     errors.append(
                         f"{spec}: '{stim.get('name')}' grader[{i}] ({g.get('type')}) is "
                         f"missing config.{need}; it silently omits that assertion")
+            if g.get("type") in ("output-matches", "output-not-matches"):
+                try:
+                    vally_regex_parts(str(cfg.get("pattern", "")))
+                except re.error as exc:
+                    errors.append(
+                        f"{spec}: '{stim.get('name')}' grader[{i}] has invalid "
+                        f"JavaScript regex syntax: {exc}")
             command = cfg.get("command")
             args = cfg.get("args")
             if (g.get("type") == "run-command"

@@ -253,7 +253,7 @@ stimuli:
           pattern: dotnet run
       - type: output-matches
         config:
-          pattern: (?i)--filter-method\s+(?<quote>["'])?(?:\*Checkout_AppliesCoupon\*?|(?:[\w.]+\.)?CheckoutTests\.Checkout_AppliesCoupon)(?(quote)\k<quote>)(?=\s|$)
+          pattern: (?i)--filter-method\s+(?<quote>["'])?(?:\*Checkout_AppliesCoupon\*?|(?:[\w.]+\.)?CheckoutTests\.Checkout_AppliesCoupon)\k<quote>(?=\s|$)
       - type: prompt
     rubric:
       - Starts the persistent xUnit v3 test host and limits reruns to the requested test
@@ -334,7 +334,7 @@ stimuli:
 
       - type: output-matches
         config:
-          pattern: '(?is)(?:(?m)^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?`?dotnet\s+run\b.{0,500}TESTINGPLATFORM_HOTRELOAD_ENABLED\s*=\s*["'']?1["'']?(?!\d)|(?m)^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?(?:`?(?:\$env:|export\s+|set\s+)?TESTINGPLATFORM_HOTRELOAD_ENABLED\s*=\s*["'']?1["'']?).{0,500}^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?`?dotnet\s+run\b|(?m)^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?`?TESTINGPLATFORM_HOTRELOAD_ENABLED\s*=\s*["'']?1["'']?\s+`?dotnet\s+run\b)'
+          pattern: '(?ims)(?:^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?`?dotnet\s+run\b.{0,500}TESTINGPLATFORM_HOTRELOAD_ENABLED\s*=\s*["'']?1["'']?(?!\d)|^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?(?:`?(?:\$env:|export\s+|set\s+)?TESTINGPLATFORM_HOTRELOAD_ENABLED\s*=\s*["'']?1["'']?).{0,500}^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?`?dotnet\s+run\b|^[ \t]*(?:[-*]\s*)?(?:[$>]\s*)?`?TESTINGPLATFORM_HOTRELOAD_ENABLED\s*=\s*["'']?1["'']?\s+`?dotnet\s+run\b)'
       - type: output-not-matches
         config:
           pattern: '(?im)^(?![^\r\n]*\b(?:(?:don''t|do not)(?:\s+need\s+to)?\s+(?:(?:re)?install|add(?:\s+\S+)?\s+package|run\s+`?dotnet\s+add)|no need(?: to)?\s+(?:(?:re)?install|add(?:\s+\S+)?\s+package|run\s+`?dotnet\s+add)|not needed|not necessary)\b)[^\r\n]*(?:\bdotnet\s+add(?:\s+\S+)?\s+package\s+\S*HotReload\b)'
