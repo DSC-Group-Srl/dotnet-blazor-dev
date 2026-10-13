@@ -59,7 +59,7 @@ stimuli:
                 hash.update(name); hash.update(Buffer.from([0]));
                 hash.update(fs.readFileSync(path.join("perf", name))); hash.update(Buffer.from([0]));
               }
-              process.exit(hash.digest("hex") === "deb2f9a67ee8c95240722032bc542887d7c14e04ce8a39450894b3ab0855a89b" ? 0 : 1);
+              process.exit(hash.digest("hex") === "dd69d975158aa28143e650fcdee1b8e556e6222f11f69a19c7817ec19c251187" ? 0 : 1);
           expected_exit_code: 0
       - type: output-matches
         config:
@@ -364,11 +364,12 @@ stimuli:
       - Recommended a supporting index led by Status and then CreatedAt, while leaving the externally managed schema unchanged
       - Distinguished the query rewrite from the separate DBA-owned index change
 
-  - name: Replace per-row saves with one set-based update
+  - name: Improve slow category discount maintenance
     prompt: |
-      ApplyCategoryDiscount in SalesOperationsService.cs takes minutes for large categories. Make
-      it perform the same price and timestamp update with one database operation, keep the method
-      signature unchanged, and do not edit anything under perf/.
+      The EF Core method ApplyCategoryDiscount in SalesOperationsService.cs takes minutes for large
+      categories. Make this maintenance path faster while preserving the exact final price and
+      timestamp values, method signature, and public behavior. Optimize only that method, and do
+      not edit anything under perf/.
     tags:
       capability: use-set-based-bulk-update
       risk: high
@@ -807,11 +808,11 @@ stimuli:
       - Identifies the separate immediate-write and receipt-save commit boundaries, requiring one atomic save unit or an explicit shared transaction without claiming a transaction alone refreshes the tracked account
       - Recognizes FlagAccountsAsync's standalone set-based marker update as distinct from mixing tracked balance arithmetic with immediate writes
 
-  - name: Stay dormant for a Dapper repository
+  - name: Review a slow catalog search repository
     prompt: |
-      DapperRepository.cs uses Dapper over SQL Server. Its product search is slow when the name
-      filter starts with a wildcard. Review it and recommend the smallest safe performance fix.
-      Do not replace Dapper or introduce Entity Framework.
+      The product search in DapperRepository.cs slows down as the catalog grows. It runs on SQL
+      Server and must keep the existing arbitrary substring matching behavior. Review the supplied
+      data access and recommend the smallest safe performance improvement.
     expect_activation: false
     tags:
       capability: boundary-non-ef-data-access

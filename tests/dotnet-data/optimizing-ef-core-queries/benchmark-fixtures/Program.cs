@@ -1,7 +1,10 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Data.Common;
+using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Contoso.Sales.Operations;
 
 namespace Contoso.Sales.Operations.Benchmarks;
@@ -268,12 +271,12 @@ internal static class Program
             }
 
             using var verify = Timing.NewContext(conn);
-            return CanonPrices(verify, Seed.TargetCategoryId);
+            return CanonPrices(verify);
         }
 
         var baseline = RunOn(db => new BaselineSalesOperationsService(db).ApplyCategoryDiscount(Seed.TargetCategoryId, factor));
         var optimized = RunOn(db => new SalesOperationsService(db).ApplyCategoryDiscount(Seed.TargetCategoryId, factor));
-        var equal = baseline == optimized;
+        var equal = baseline == optimized && UsesSingleSetBasedCategoryUpdate(factor);
 
         // Reseed a fresh database for every timed call and interleave the two arms.
         const int warmup = 1;
@@ -292,6 +295,22 @@ internal static class Program
         }
 
         return new Result(Timing.Median(baselineSamples), Timing.Median(optimizedSamples), equal);
+    }
+
+    private static bool UsesSingleSetBasedCategoryUpdate(decimal factor)
+    {
+        using var conn = Timing.OpenSharedConnection();
+        Seed.Products(conn);
+        var commands = new CommandShapeCounter();
+        var options = new DbContextOptionsBuilder<SalesDbContext>()
+            .UseSqlite(conn)
+            .AddInterceptors(commands)
+            .Options;
+        using var db = new SalesDbContext(options);
+        new SalesOperationsService(db).ApplyCategoryDiscount(Seed.TargetCategoryId, factor);
+
+        return commands.Commands.Count == 1 &&
+            Regex.IsMatch(commands.Commands[0], @"\bUPDATE\b", RegexOptions.IgnoreCase);
     }
 
     private static double TimeOneMutation(Action<SalesDbContext> run)
@@ -353,13 +372,74 @@ internal static class Program
 
     private static string CanonCard(ProductCard c) => $"{c.Id}:{c.Name}:{Money(c.Price)}";
 
-    private static string CanonPrices(SalesDbContext db, int categoryId) =>
+    private static string CanonPrices(SalesDbContext db) =>
         string.Join("|", db.Products
-            .Where(p => p.CategoryId == categoryId)
             .OrderBy(p => p.Id)
-            .Select(p => new { p.Price, p.UpdatedAt })
+            .Select(p => new { p.CategoryId, p.Price, p.UpdatedAt })
             .ToList()
-            .Select(p => $"{Money(p.Price)}:{(p.UpdatedAt != new DateTime(2024, 1, 1) ? 1 : 0)}"));
+            .Select(p => $"{p.CategoryId}:{Money(p.Price)}:{(p.UpdatedAt != new DateTime(2024, 1, 1) ? 1 : 0)}"));
+
+    private sealed class CommandShapeCounter : DbCommandInterceptor
+    {
+        public List<string> Commands { get; } = new();
+
+        public override InterceptionResult<DbDataReader> ReaderExecuting(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result)
+        {
+            Commands.Add(command.CommandText);
+            return result;
+        }
+
+        public override InterceptionResult<int> NonQueryExecuting(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result)
+        {
+            Commands.Add(command.CommandText);
+            return result;
+        }
+
+        public override InterceptionResult<object> ScalarExecuting(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<object> result)
+        {
+            Commands.Add(command.CommandText);
+            return result;
+        }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<DbDataReader> result,
+            CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command.CommandText);
+            return ValueTask.FromResult(result);
+        }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command.CommandText);
+            return ValueTask.FromResult(result);
+        }
+
+        public override ValueTask<InterceptionResult<object>> ScalarExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<object> result,
+            CancellationToken cancellationToken = default)
+        {
+            Commands.Add(command.CommandText);
+            return ValueTask.FromResult(result);
+        }
+    }
 }
 
 internal readonly record struct Result(double BaselineMs, double OptimizedMs, bool Equivalent);
