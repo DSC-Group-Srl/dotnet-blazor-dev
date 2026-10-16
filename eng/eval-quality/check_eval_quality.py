@@ -87,6 +87,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import functools
 import glob
 import json
 import math
@@ -1091,18 +1092,65 @@ def vally_regex_parts(pattern: str) -> tuple[str, int]:
     return pattern, flags
 
 
+JAVASCRIPT_REGEX_SCRIPT = r"""
+const fs = require("fs");
+const { pattern, flags, output } = JSON.parse(fs.readFileSync(0, "utf8"));
+try {
+  const regex = new RegExp(pattern, flags);
+  process.stdout.write(output === null ? "true" : String(regex.test(output)));
+} catch (error) {
+  process.stderr.write(error instanceof Error ? error.message : String(error));
+  process.exitCode = 2;
+}
+"""
+
+
+def _javascript_regex_flags(flags: int) -> str:
+    result = ""
+    if flags & re.IGNORECASE:
+        result += "i"
+    if flags & re.MULTILINE:
+        result += "m"
+    if flags & re.DOTALL:
+        result += "s"
+    return result
+
+
+def _javascript_regex_test(pattern: str, flags: int, output: str | None) -> bool:
+    try:
+        result = subprocess.run(
+            ["node", "-e", JAVASCRIPT_REGEX_SCRIPT],
+            input=json.dumps({
+                "pattern": pattern,
+                "flags": _javascript_regex_flags(flags),
+                "output": output,
+            }),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5)
+    except FileNotFoundError as exc:
+        raise re.error(
+            "Node.js is required to validate Vally JavaScript regexes") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise re.error("JavaScript regex validation timed out") from exc
+    if result.returncode != 0:
+        raise re.error(result.stderr.strip() or "JavaScript RegExp rejected the pattern")
+    return result.stdout == "true"
+
+
+@functools.lru_cache(maxsize=None)
+def validate_vally_regex(pattern: str) -> tuple[str, int]:
+    """Compile a Vally output regex with JavaScript RegExp."""
+    javascript_pattern, flags = vally_regex_parts(pattern)
+    _javascript_regex_test(javascript_pattern, flags, None)
+    return javascript_pattern, flags
+
+
 def vally_regex_found(pattern: str, output: str) -> bool:
-    """Match Vally's leading inline-flag convention for JavaScript regexes."""
-    pattern, flags = vally_regex_parts(pattern)
-    pattern = re.sub(
-        r"(?<!\\)\(\?<([A-Za-z_][A-Za-z0-9_]*)>",
-        r"(?P<\1>",
-        pattern)
-    pattern = re.sub(
-        r"\\k<([A-Za-z_][A-Za-z0-9_]*)>",
-        r"(?P=\1)",
-        pattern)
-    return re.search(pattern, output, flags) is not None
+    """Match an output regex with the JavaScript semantics used by Vally."""
+    javascript_pattern, flags = validate_vally_regex(pattern)
+    return _javascript_regex_test(javascript_pattern, flags, output)
 
 
 def is_simple_curated_response(document: dict) -> bool:
@@ -1503,7 +1551,7 @@ def check_graders(spec: str, doc: dict) -> None:
                         f"missing config.{need}; it silently omits that assertion")
             if g.get("type") in ("output-matches", "output-not-matches"):
                 try:
-                    vally_regex_parts(str(cfg.get("pattern", "")))
+                    validate_vally_regex(str(cfg.get("pattern", "")))
                 except re.error as exc:
                     errors.append(
                         f"{spec}: '{stim.get('name')}' grader[{i}] has invalid "

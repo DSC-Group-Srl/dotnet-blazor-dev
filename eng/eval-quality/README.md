@@ -4,6 +4,10 @@
 result. Most were first found only after an eval mysteriously lost to its own
 baseline or won every trial and still failed.
 
+The checker requires Python 3, PyYAML, and Node.js on `PATH`. Node.js compiles
+and evaluates output regular expressions with the same JavaScript `RegExp`
+semantics that Vally uses.
+
 Run it from the repository root:
 
 ```bash

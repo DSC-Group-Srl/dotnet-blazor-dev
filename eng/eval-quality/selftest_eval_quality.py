@@ -662,6 +662,43 @@ def conditional_regex_groups_are_rejected(d):
             1))
 
 
+def python_named_regex_groups_are_rejected(d):
+    eval_path = EV(d)
+    with open(eval_path) as f:
+        raw = f.read()
+    with open(eval_path, "w") as f:
+        f.write(raw.replace(
+            "    rubric:\n",
+            "    graders:\n"
+            "      - type: output-matches\n"
+            "        config:\n"
+            "          pattern: (?P<name>Thing)\n"
+            "    rubric:\n",
+            1))
+
+
+def optional_named_backreference_uses_javascript_semantics(d):
+    transcript_grader_with_trajectory(d)
+    eval_path = EV(d)
+    with open(eval_path) as f:
+        raw = f.read()
+    pattern = (
+        r"""(?i)--filter-method\s+(?<quote>["'])?"""
+        r"""(?:\*Checkout_AppliesCoupon\*?|"""
+        r"""(?:[\w.]+\.)?CheckoutTests\.Checkout_AppliesCoupon)"""
+        r"""\k<quote>(?=\s|$)""")
+    with open(eval_path, "w") as f:
+        f.write(raw.replace("pattern: Thing", f"pattern: {pattern}", 1))
+    answer = os.path.join(
+        d, "tests", "demo", "widget", "references", "answer.json")
+    with open(answer, "w") as f:
+        json.dump(atif_document([{
+            "step_id": 1,
+            "source": "agent",
+            "message": "--filter-method *Checkout_AppliesCoupon*",
+        }]), f)
+
+
 def regex_negate_overrides_grader_type(d):
     transcript_grader_with_trajectory(d)
     eval_path = EV(d)
@@ -1948,6 +1985,10 @@ results = [
          nested_regex_flags_are_rejected, expect_fail=True),
     case("conditional output regex groups are rejected",
          conditional_regex_groups_are_rejected, expect_fail=True),
+    case("Python named output regex groups are rejected",
+         python_named_regex_groups_are_rejected, expect_fail=True),
+    case("optional named backreferences use JavaScript semantics",
+         optional_named_backreference_uses_javascript_semantics, expect_fail=False),
     case("regex negate overrides the grader type",
          regex_negate_overrides_grader_type, expect_fail=False),
     case("contains case and negate settings are honored",
