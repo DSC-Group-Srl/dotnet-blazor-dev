@@ -911,6 +911,77 @@ test("dormancy parser reads leading tags keys", () => {
   }
 });
 
+test("dormancy parser reads wrapped flow-style tags", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-wrapped-tags-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "  - tags: {capability: routing-boundary,",
+        '      expect_activation: "false"}',
+        "    name: WrappedFlowTags",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      ["WrappedFlowTags"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser rejects an incomplete flow-style tags mapping", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-invalid-flow-tags-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        '  - tags: {expect_activation: "false"',
+        "    name: InvalidFlowTags",
+        "",
+      ].join("\n"),
+    );
+
+    assert.throws(
+      () => readNonActivationStimuli("eval.yaml", root),
+      /cannot parse tags flow mapping/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser ignores name metadata inside leading tags", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-tag-name-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        '  - tags: {name: flow-metadata, expect_activation: "false"}',
+        "    name: FlowTagsFirst",
+        "  - tags:",
+        "      name: block-metadata",
+        '      expect_activation: "false"',
+        "    name: BlockTagsFirst",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      ["FlowTagsFirst", "BlockTagsFirst"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a retry fills only errored slots and freezes successful judgments", () => {
   const primary = reportFromRepeatedScores([null, 0.4, 0.4, 0.4, 0.4]);
   primary.stimuli[0].trials[0] = {
