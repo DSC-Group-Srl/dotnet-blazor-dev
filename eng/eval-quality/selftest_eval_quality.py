@@ -1554,6 +1554,31 @@ def vally_reject_all_skills_migration_incomplete(d):
     vally_reject_all_skills_migration(d, omit_plugin_skill=True)
 
 
+def vally_skill_wildcard_correction(d):
+    with open(os.path.join(d, "plugins", "demo", "skills", "widget", "SKILL.md"), "w") as f:
+        f.write("# Widget\n")
+    path = EV(d)
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    wildcard = content.replace(
+        "  - name: Does the thing\n"
+        "    prompt: do it\n",
+        "  - name: Does the thing\n"
+        "    prompt: do it\n"
+        "    graders:\n"
+        "      - type: skill-invocation\n"
+        "        config:\n"
+        "          disallowed: ['*']\n",
+        1,
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(wildcard)
+    subprocess.run(["git", "add", "-A"], cwd=d, check=True)
+    subprocess.run(["git", "commit", "-qm", "unsupported skill wildcard"], cwd=d, check=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(wildcard.replace("disallowed: ['*']", "disallowed: [widget]", 1))
+
+
 def vally_regex_migration(d):
     path = EV(d)
     with open(path, encoding="utf-8") as f:
@@ -2146,6 +2171,10 @@ results = [
     output_case("incomplete reject-all skill migration remains semantic",
                 vally_reject_all_skills_migration_incomplete,
                 "enforced 1 changed eval suite(s) of 1 total against HEAD",
+                gate_args=("--base-ref", "HEAD")),
+    output_case("Vally skill wildcard correction remains migration-only",
+                vally_skill_wildcard_correction,
+                "enforced 0 changed eval suite(s) of 1 total against HEAD",
                 gate_args=("--base-ref", "HEAD")),
     output_case("removed Vally regex forms migrate without semantic scope",
                 vally_regex_migration,

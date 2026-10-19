@@ -527,6 +527,22 @@ def _has_removed_vally_aliases(doc: object) -> bool:
     return False
 
 
+def _has_unsupported_skill_wildcard(doc: object) -> bool:
+    """Return whether a skill grader relies on unsupported wildcard matching."""
+    if not isinstance(doc, dict):
+        return False
+    for stimulus in doc.get("stimuli") or []:
+        if not isinstance(stimulus, dict):
+            continue
+        for grader in stimulus.get("graders") or []:
+            if not isinstance(grader, dict) or grader.get("type") != "skill-invocation":
+                continue
+            config = grader.get("config")
+            if isinstance(config, dict) and config.get("disallowed") == ["*"]:
+                return True
+    return False
+
+
 def is_vally_schema_migration_only_change(
         spec: str, base_ref: str, changed_paths: set[str]) -> bool:
     """Return true when an eval changed only to replace removed Vally forms."""
@@ -554,10 +570,12 @@ def is_vally_schema_migration_only_change(
     base_has_legacy = (
         _has_removed_vally_aliases(base_doc)
         or _has_legacy_vally_regexes(base_doc)
+        or _has_unsupported_skill_wildcard(base_doc)
     )
     current_has_legacy = (
         _has_removed_vally_aliases(current_doc)
         or _has_legacy_vally_regexes(current_doc)
+        or _has_unsupported_skill_wildcard(current_doc)
     )
     return (
         base_has_legacy
