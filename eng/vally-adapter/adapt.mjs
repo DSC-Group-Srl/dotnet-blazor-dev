@@ -265,6 +265,26 @@ function readNonActivationStimuli(evalFile, repoRoot) {
     const withoutComment = v.trim().replace(/\s+#.*$/, "");
     return /^(?:false|no|off)$/i.test(unquote(withoutComment));
   };
+  const stripYamlComment = (value) => {
+    let quote = null;
+    let escaped = false;
+    for (let index = 0; index < value.length; index++) {
+      const char = value[index];
+      if (quote === '"') {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === quote) quote = null;
+      } else if (quote === "'") {
+        if (char === "'" && value[index + 1] === "'") index++;
+        else if (char === quote) quote = null;
+      } else if (char === '"' || char === "'") {
+        quote = char;
+      } else if (char === "#" && (index === 0 || /\s/.test(value[index - 1]))) {
+        return value.slice(0, index).trimEnd();
+      }
+    }
+    return value;
+  };
   const result = new Set();
 
   const flowMappingEntries = (value) => {
@@ -345,14 +365,14 @@ function readNonActivationStimuli(evalFile, repoRoot) {
   const applyTagsValue = (value) => {
     if (!value.trimStart().startsWith("{")) return applyTags(value);
 
-    let completeValue = value;
+    let completeValue = stripYamlComment(value);
     while (!applyTags(completeValue)) {
       const nextLine = lines[i + 1];
       if (nextLine === undefined || indentOf(nextLine) <= keyIndent) {
         throw new Error(`cannot parse tags flow mapping in eval spec ${evalFile}`);
       }
       i++;
-      completeValue += ` ${nextLine.trim()}`;
+      completeValue += ` ${stripYamlComment(nextLine.trim())}`;
     }
     return true;
   };

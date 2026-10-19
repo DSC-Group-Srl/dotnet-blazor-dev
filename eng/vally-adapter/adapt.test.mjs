@@ -934,6 +934,30 @@ test("dormancy parser reads wrapped flow-style tags", () => {
   }
 });
 
+test("dormancy parser reads comments in wrapped flow-style tags", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-commented-flow-tags-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "  - tags: {capability: routing-boundary, # routing metadata",
+        '      note: "keep # inside quotes",',
+        '      expect_activation: "false"}',
+        "    name: CommentedWrappedFlowTags",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      ["CommentedWrappedFlowTags"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("dormancy parser rejects an incomplete flow-style tags mapping", () => {
   const root = mkdtempSync(join(tmpdir(), "vally-dormancy-invalid-flow-tags-"));
   try {
