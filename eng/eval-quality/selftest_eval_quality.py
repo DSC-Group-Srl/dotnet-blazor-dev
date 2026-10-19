@@ -1509,6 +1509,51 @@ def vally_schema_alias_migration_with_semantic_change(d):
         f.write(content.replace("prompt: do it", "prompt: do it differently", 1))
 
 
+def vally_reject_all_skills_migration(d, omit_plugin_skill=False):
+    with open(os.path.join(d, "plugins", "demo", "skills", "widget", "SKILL.md"), "w") as f:
+        f.write("# Widget\n")
+    os.makedirs(os.path.join(d, "plugins", "demo", "skills", "helper"))
+    with open(os.path.join(d, "plugins", "demo", "skills", "helper", "SKILL.md"), "w") as f:
+        f.write("# Helper\n")
+    path = EV(d)
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    legacy = content.replace(
+        "  - name: Does the thing\n"
+        "    prompt: do it\n",
+        "  - name: Does the thing\n"
+        "    prompt: do it\n"
+        "    constraints:\n"
+        "      reject_skills: ['*']\n",
+        1,
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(legacy)
+    subprocess.run(["git", "add", "-A"], cwd=d, check=True)
+    subprocess.run(["git", "commit", "-qm", "legacy reject all skills"], cwd=d, check=True)
+
+    disallowed = "[widget]" if omit_plugin_skill else "[helper, widget]"
+    current = legacy.replace(
+        "    constraints:\n"
+        "      reject_skills: ['*']\n",
+        "    graders:\n"
+        "      - type: skill-invocation\n"
+        "        config:\n"
+        f"          disallowed: {disallowed}\n",
+        1,
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(current)
+
+
+def vally_reject_all_skills_migration_complete(d):
+    vally_reject_all_skills_migration(d)
+
+
+def vally_reject_all_skills_migration_incomplete(d):
+    vally_reject_all_skills_migration(d, omit_plugin_skill=True)
+
+
 def vally_regex_migration(d):
     path = EV(d)
     with open(path, encoding="utf-8") as f:
@@ -2093,6 +2138,14 @@ results = [
     output_case("removed Vally aliases migrate without semantic scope",
                 vally_schema_alias_migration,
                 "enforced 0 changed eval suite(s) of 1 total against HEAD",
+                gate_args=("--base-ref", "HEAD")),
+    output_case("reject-all skill migration enumerates every plugin skill",
+                vally_reject_all_skills_migration_complete,
+                "enforced 0 changed eval suite(s) of 1 total against HEAD",
+                gate_args=("--base-ref", "HEAD")),
+    output_case("incomplete reject-all skill migration remains semantic",
+                vally_reject_all_skills_migration_incomplete,
+                "enforced 1 changed eval suite(s) of 1 total against HEAD",
                 gate_args=("--base-ref", "HEAD")),
     output_case("removed Vally regex forms migrate without semantic scope",
                 vally_regex_migration,

@@ -14,7 +14,7 @@ stimuli:
       - type: skill-invocation
         config:
           disallowed:
-            - "*"
+            - convert-to-cpm
       - type: output-contains
         config:
           substring: packages.config

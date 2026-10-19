@@ -387,9 +387,23 @@ def is_execution_shard_metadata_only_change(
     )
 
 
-def _normalize_vally_schema_migration(doc: dict) -> dict:
+def _plugin_skill_names(spec: str) -> list[str]:
+    """Return every skill name available to a plugin eval."""
+    parts = spec.replace("\\", "/").split("/")
+    if len(parts) < 3 or parts[0] != "tests":
+        return []
+    skill_root = os.path.join("plugins", parts[1], "skills")
+    if not os.path.isdir(skill_root):
+        return []
+    return sorted(
+        entry for entry in os.listdir(skill_root)
+        if os.path.isfile(os.path.join(skill_root, entry, "SKILL.md")))
+
+
+def _normalize_vally_schema_migration(doc: dict, spec: str) -> dict:
     """Canonicalize removed Vally forms to their supported equivalents."""
     normalized = copy.deepcopy(doc)
+    plugin_skills = _plugin_skill_names(spec)
     if "config" in normalized and "defaults" not in normalized:
         normalized["defaults"] = normalized.pop("config")
 
@@ -412,26 +426,35 @@ def _normalize_vally_schema_migration(doc: dict) -> dict:
                 config["pattern"] = _normalize_vally_regex_migration(config["pattern"])
 
         constraints = stimulus.get("constraints")
-        if not isinstance(constraints, dict):
-            continue
-        constraints = dict(constraints)
-        stimulus["constraints"] = constraints
-        grader_fields: dict[str, dict[str, object]] = {}
-        for alias, grader_type, field in (
-                ("expect_tools", "tool-calls", "required"),
-                ("reject_tools", "tool-calls", "disallowed"),
-                ("expect_skills", "skill-invocation", "required"),
-                ("reject_skills", "skill-invocation", "disallowed")):
-            if alias in constraints:
-                grader_fields.setdefault(grader_type, {})[field] = constraints.pop(alias)
-        if not constraints:
-            stimulus.pop("constraints", None)
-        if grader_fields:
-            migrated = [
-                {"type": grader_type, "config": config}
-                for grader_type, config in grader_fields.items()
-            ]
-            stimulus["graders"] = migrated + list(stimulus.get("graders") or [])
+        if isinstance(constraints, dict):
+            constraints = dict(constraints)
+            stimulus["constraints"] = constraints
+            grader_fields: dict[str, dict[str, object]] = {}
+            for alias, grader_type, field in (
+                    ("expect_tools", "tool-calls", "required"),
+                    ("reject_tools", "tool-calls", "disallowed"),
+                    ("expect_skills", "skill-invocation", "required"),
+                    ("reject_skills", "skill-invocation", "disallowed")):
+                if alias in constraints:
+                    grader_fields.setdefault(grader_type, {})[field] = constraints.pop(alias)
+            if not constraints:
+                stimulus.pop("constraints", None)
+            if grader_fields:
+                migrated = [
+                    {"type": grader_type, "config": config}
+                    for grader_type, config in grader_fields.items()
+                ]
+                stimulus["graders"] = migrated + list(stimulus.get("graders") or [])
+        for grader in stimulus.get("graders") or []:
+            if not isinstance(grader, dict) or grader.get("type") != "skill-invocation":
+                continue
+            config = grader.get("config")
+            disallowed = config.get("disallowed") if isinstance(config, dict) else None
+            if disallowed == ["*"] or (
+                    plugin_skills
+                    and isinstance(disallowed, list)
+                    and sorted(disallowed) == plugin_skills):
+                config["disallowed"] = ["__all_plugin_skills__"]
     return normalized
 
 
@@ -539,8 +562,8 @@ def is_vally_schema_migration_only_change(
     return (
         base_has_legacy
         and not current_has_legacy
-        and _normalize_vally_schema_migration(base_doc)
-        == _normalize_vally_schema_migration(current_doc)
+        and _normalize_vally_schema_migration(base_doc, spec)
+        == _normalize_vally_schema_migration(current_doc, spec)
     )
 
 

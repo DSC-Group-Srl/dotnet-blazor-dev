@@ -25,8 +25,13 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: &all_upgrade_skills
+            - dotnet-aot-compat
+            - migrate-dotnet10-to-dotnet11
+            - migrate-dotnet8-to-dotnet9
+            - migrate-dotnet9-to-dotnet10
+            - migrate-nullable-references
+            - thread-abort-migration
       - type: output-matches
         config:
           pattern: (empty.*env|null.*empty|SetEnvironmentVariable|string\.IsNullOrEmpty)
@@ -92,8 +97,7 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: *all_upgrade_skills
       - type: output-matches
         config:
           pattern: (InlineArray|record struct|CS9259|struct)
@@ -124,8 +128,7 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: *all_upgrade_skills
       - type: output-matches
         config:
           pattern: (ValidateOnBuild|ValidateScopes|development|DI|scope)
@@ -161,8 +164,7 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: *all_upgrade_skills
       - type: output-matches
         config:
           pattern: (explicit transaction|MigrateAsync|BeginTransaction)
@@ -197,8 +199,7 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: *all_upgrade_skills
       - type: output-matches
         config:
           pattern: (\$type|Discriminator|discriminator.*renamed|HasDiscriminator)
@@ -233,8 +234,7 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: *all_upgrade_skills
       - type: output-matches
         config:
           pattern: (JsonDocument|null|JsonValueKind\.Null|non-null)
@@ -267,8 +267,7 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: *all_upgrade_skills
       - type: output-matches
         config:
           pattern: (Terminal Logger|--tl|MSBUILDTERMINALLOGGER|console.*output)
@@ -303,8 +302,7 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: *all_upgrade_skills
       - type: output-matches
         config:
           pattern: (WFO1000|security analyz|serialization|DesignerSerializationVisibility)
@@ -342,8 +340,7 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: *all_upgrade_skills
       - type: output-matches
         config:
           pattern: (zlib|no longer install|apt-get|zlib1g)
@@ -380,8 +377,7 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: *all_upgrade_skills
       - type: output-matches
         config:
           pattern: (\$type|Discriminator|discriminator.*renamed)
@@ -416,8 +412,7 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: *all_upgrade_skills
       - type: output-matches
         config:
           pattern: (Trim|ReadOnlySpan|char\[\]|removed|MissingMethodException)
@@ -458,8 +453,7 @@ stimuli:
     graders:
       - type: skill-invocation
         config:
-          disallowed:
-            - "*"
+          disallowed: *all_upgrade_skills
       - type: output-matches
         config:
           pattern: (environment variable|precedence|runtimeconfig|DOTNET_gcServer)

@@ -182,7 +182,13 @@ stimuli:
       - type: skill-invocation
         config:
           disallowed:
-            - "*"
+            - analyzing-dotnet-performance
+            - android-tombstone-symbolication
+            - apple-crash-symbolication
+            - clr-activation-debugging
+            - dotnet-trace-collect
+            - dump-collect
+            - microbenchmarking
       - type: output-matches
         config:
           pattern: out of scope|not cover|does not|cannot|only.*collect
