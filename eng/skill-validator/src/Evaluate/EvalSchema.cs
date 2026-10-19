@@ -111,9 +111,18 @@ public static class EvalSchema
                 }
             }
 
-            var toolCalls = stimulus.Graders?
-                .FirstOrDefault(grader => grader.Type == "tool-calls")?
-                .Config;
+            var toolCallConfigs = stimulus.Graders?
+                .Where(grader => grader.Type == "tool-calls" && grader.Config is not null)
+                .Select(grader => grader.Config!)
+                .ToList() ?? [];
+            var requiredTools = toolCallConfigs
+                .SelectMany(config => config.Required ?? [])
+                .Distinct()
+                .ToList();
+            var disallowedTools = toolCallConfigs
+                .SelectMany(config => config.Disallowed ?? [])
+                .Distinct()
+                .ToList();
             SetupConfig? setup = null;
             if (stimulus.Environment is not null)
             {
@@ -133,8 +142,12 @@ public static class EvalSchema
                 Assertions: assertions,
                 Rubric: stimulus.Rubric is { Count: > 0 } ? stimulus.Rubric : null,
                 Timeout: ParseDurationSeconds(stimulus.Constraints?.MaxDuration) ?? defaultTimeout,
-                ExpectTools: toolCalls?.Required ?? stimulus.Constraints?.ExpectTools,
-                RejectTools: toolCalls?.Disallowed ?? stimulus.Constraints?.RejectTools,
+                ExpectTools: requiredTools.Count > 0
+                    ? requiredTools
+                    : stimulus.Constraints?.ExpectTools,
+                RejectTools: disallowedTools.Count > 0
+                    ? disallowedTools
+                    : stimulus.Constraints?.RejectTools,
                 MaxTurns: stimulus.Constraints?.MaxTurns,
                 MaxTokens: stimulus.Constraints?.MaxTokens,
                 ExpectActivation: ReadBooleanTag(stimulus.Tags, "expect_activation")

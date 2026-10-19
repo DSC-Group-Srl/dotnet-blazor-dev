@@ -263,7 +263,27 @@ function readNonActivationStimuli(evalFile, repoRoot) {
   };
   const isFalsey = (v) => {
     const withoutComment = v.trim().replace(/\s+#.*$/, "");
-    return /^(?:false|False|FALSE|no|No|NO|off|Off|OFF)$/.test(unquote(withoutComment));
+    return /^(?:false|no|off)$/i.test(unquote(withoutComment));
+  };
+  const stripYamlComment = (value) => {
+    let quote = null;
+    let escaped = false;
+    for (let index = 0; index < value.length; index++) {
+      const char = value[index];
+      if (quote === '"') {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === quote) quote = null;
+      } else if (quote === "'") {
+        if (char === "'" && value[index + 1] === "'") index++;
+        else if (char === quote) quote = null;
+      } else if (char === '"' || char === "'") {
+        quote = char;
+      } else if (char === "#" && (index === 0 || /\s/.test(value[index - 1]))) {
+        return value.slice(0, index).trimEnd();
+      }
+    }
+    return value;
   };
   const result = new Set();
 
@@ -330,12 +350,29 @@ function readNonActivationStimuli(evalFile, repoRoot) {
     // Legacy direct metadata remains readable for old stored evals.
     else if (key === "expect_activation") curNonActivation = isFalsey(val);
   };
+  const applyTagKey = (key, val) => {
+    if (key === "expect_activation") curNonActivation = isFalsey(val);
+  };
   const applyTags = (value) => {
     const entries = flowMappingEntries(value);
     if (!entries) return false;
     for (const entry of entries) {
       const kv = /^\s*([A-Za-z0-9_]+):\s?(.*?)\s*$/.exec(entry);
-      if (kv) applyKey(kv[1], kv[2]);
+      if (kv) applyTagKey(kv[1], kv[2]);
+    }
+    return true;
+  };
+  const applyTagsValue = (value) => {
+    if (!value.trimStart().startsWith("{")) return applyTags(value);
+
+    let completeValue = stripYamlComment(value);
+    while (!applyTags(completeValue)) {
+      const nextLine = lines[i + 1];
+      if (nextLine === undefined || indentOf(nextLine) <= keyIndent) {
+        throw new Error(`cannot parse tags flow mapping in eval spec ${evalFile}`);
+      }
+      i++;
+      completeValue += ` ${stripYamlComment(nextLine.trim())}`;
     }
     return true;
   };
@@ -364,13 +401,17 @@ function readNonActivationStimuli(evalFile, repoRoot) {
       if (flowEntries) {
         for (const entry of flowEntries) {
           const kv = /^\s*([A-Za-z0-9_]+):\s?(.*?)\s*$/.exec(entry);
-          if (kv?.[1] === "tags") applyTags(kv[2]);
+          if (kv?.[1] === "tags") applyTagsValue(kv[2]);
           else if (kv) applyKey(kv[1], kv[2]);
         }
       } else {
         const kv = /^([A-Za-z0-9_]+):\s?(.*)$/.exec(rest);
         if (kv) {
-          applyKey(kv[1], kv[2]);
+          if (kv[1] === "tags") {
+            inTagsBlock = !applyTagsValue(kv[2]);
+          } else {
+            applyKey(kv[1], kv[2]);
+          }
           skipBlockScalar(kv[2]);
         }
       }
@@ -386,7 +427,7 @@ function readNonActivationStimuli(evalFile, repoRoot) {
     if (keyIndent !== null && ind === keyIndent) {
       const kv = /^([A-Za-z0-9_]+):\s?(.*)$/.exec(line.slice(keyIndent));
       if (kv) {
-        inTagsBlock = kv[1] === "tags" && !applyTags(kv[2]);
+        inTagsBlock = kv[1] === "tags" && !applyTagsValue(kv[2]);
         tagsIndent = null;
         if (kv[1] !== "tags") applyKey(kv[1], kv[2]);
         skipBlockScalar(kv[2]);
@@ -395,7 +436,7 @@ function readNonActivationStimuli(evalFile, repoRoot) {
       tagsIndent ??= ind;
       if (ind === tagsIndent) {
         const kv = /^([A-Za-z0-9_]+):\s?(.*)$/.exec(line.slice(tagsIndent));
-        if (kv) applyKey(kv[1], kv[2]);
+        if (kv) applyTagKey(kv[1], kv[2]);
       }
     }
   }

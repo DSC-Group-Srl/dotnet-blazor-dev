@@ -788,6 +788,9 @@ test("dormancy parser reads false string tags and rejects similar values", () =>
         "  - name: Commented",
         "    tags:",
         '      expect_activation: "false" # dormancy contract',
+        "  - name: MixedCase",
+        "    tags:",
+        '      expect_activation: "fAlSe"',
         "  - name: CommentWithoutSeparator",
         "    tags:",
         '      expect_activation: "false#not-a-comment"',
@@ -800,7 +803,7 @@ test("dormancy parser reads false string tags and rejects similar values", () =>
 
     assert.deepEqual(
       [...readNonActivationStimuli("eval.yaml", root)],
-      ["LowerFalse", "Commented"],
+      ["LowerFalse", "Commented", "MixedCase"],
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -877,6 +880,126 @@ test("dormancy parser reads flow-mapping stimuli", () => {
     assert.deepEqual(
       [...readNonActivationStimuli("eval.yaml", root)],
       ["Dormant", "Dormant, quoted"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser reads leading tags keys", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-leading-tags-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "  - tags:",
+        '      expect_activation: "false"',
+        "    name: BlockTagsFirst",
+        '  - tags: {expect_activation: "false"}',
+        "    name: FlowTagsFirst",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      ["BlockTagsFirst", "FlowTagsFirst"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser reads wrapped flow-style tags", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-wrapped-tags-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "  - tags: {capability: routing-boundary,",
+        '      expect_activation: "false"}',
+        "    name: WrappedFlowTags",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      ["WrappedFlowTags"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser reads comments in wrapped flow-style tags", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-commented-flow-tags-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "  - tags: {capability: routing-boundary, # routing metadata",
+        '      note: "keep # inside quotes",',
+        '      expect_activation: "false"}',
+        "    name: CommentedWrappedFlowTags",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      ["CommentedWrappedFlowTags"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser rejects an incomplete flow-style tags mapping", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-invalid-flow-tags-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        '  - tags: {expect_activation: "false"',
+        "    name: InvalidFlowTags",
+        "",
+      ].join("\n"),
+    );
+
+    assert.throws(
+      () => readNonActivationStimuli("eval.yaml", root),
+      /cannot parse tags flow mapping/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser ignores name metadata inside leading tags", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-tag-name-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        '  - tags: {name: flow-metadata, expect_activation: "false"}',
+        "    name: FlowTagsFirst",
+        "  - tags:",
+        "      name: block-metadata",
+        '      expect_activation: "false"',
+        "    name: BlockTagsFirst",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      ["FlowTagsFirst", "BlockTagsFirst"],
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
