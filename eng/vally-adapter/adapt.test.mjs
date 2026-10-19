@@ -788,6 +788,9 @@ test("dormancy parser reads false string tags and rejects similar values", () =>
         "  - name: Commented",
         "    tags:",
         '      expect_activation: "false" # dormancy contract',
+        "  - name: MixedCase",
+        "    tags:",
+        '      expect_activation: "fAlSe"',
         "  - name: CommentWithoutSeparator",
         "    tags:",
         '      expect_activation: "false#not-a-comment"',
@@ -800,7 +803,7 @@ test("dormancy parser reads false string tags and rejects similar values", () =>
 
     assert.deepEqual(
       [...readNonActivationStimuli("eval.yaml", root)],
-      ["LowerFalse", "Commented"],
+      ["LowerFalse", "Commented", "MixedCase"],
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -877,6 +880,31 @@ test("dormancy parser reads flow-mapping stimuli", () => {
     assert.deepEqual(
       [...readNonActivationStimuli("eval.yaml", root)],
       ["Dormant", "Dormant, quoted"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dormancy parser reads leading tags keys", () => {
+  const root = mkdtempSync(join(tmpdir(), "vally-dormancy-leading-tags-"));
+  try {
+    writeFileSync(
+      join(root, "eval.yaml"),
+      [
+        "stimuli:",
+        "  - tags:",
+        '      expect_activation: "false"',
+        "    name: BlockTagsFirst",
+        '  - tags: {expect_activation: "false"}',
+        "    name: FlowTagsFirst",
+        "",
+      ].join("\n"),
+    );
+
+    assert.deepEqual(
+      [...readNonActivationStimuli("eval.yaml", root)],
+      ["BlockTagsFirst", "FlowTagsFirst"],
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

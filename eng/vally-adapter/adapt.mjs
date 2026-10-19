@@ -263,7 +263,7 @@ function readNonActivationStimuli(evalFile, repoRoot) {
   };
   const isFalsey = (v) => {
     const withoutComment = v.trim().replace(/\s+#.*$/, "");
-    return /^(?:false|False|FALSE|no|No|NO|off|Off|OFF)$/.test(unquote(withoutComment));
+    return /^(?:false|no|off)$/i.test(unquote(withoutComment));
   };
   const result = new Set();
 
@@ -370,7 +370,11 @@ function readNonActivationStimuli(evalFile, repoRoot) {
       } else {
         const kv = /^([A-Za-z0-9_]+):\s?(.*)$/.exec(rest);
         if (kv) {
-          applyKey(kv[1], kv[2]);
+          if (kv[1] === "tags") {
+            inTagsBlock = !applyTags(kv[2]);
+          } else {
+            applyKey(kv[1], kv[2]);
+          }
           skipBlockScalar(kv[2]);
         }
       }

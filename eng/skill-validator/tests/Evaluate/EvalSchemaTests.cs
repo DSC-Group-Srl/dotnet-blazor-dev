@@ -272,6 +272,8 @@ public class ParseEvalConfigTests
                   - type: tool-calls
                     config:
                       required: [bash]
+                  - type: tool-calls
+                    config:
                       disallowed: [web]
                   - type: file-contains
                     config:
