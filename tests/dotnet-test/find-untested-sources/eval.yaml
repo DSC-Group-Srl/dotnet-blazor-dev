@@ -1,5 +1,6 @@
 name: find-untested-sources
-executionShard: b
+tags:
+  executionShard: b
 description: Evaluates the dotnet-test/find-untested-sources skill
 type: capability
 # Eight distinct stimuli provide one-loss tolerance at the sign-test gate.
@@ -16,6 +17,10 @@ defaults:
 
 stimuli:
   - name: Disambiguate duplicate C# type names by namespace
+    tags:
+      capability: namespace-disambiguation
+      risk: false-positive-pairing
+      journey: locate-untested-sources
     prompt: |
       Find the C# source file under NamespaceCollision that is not referenced by
       any test and suggest the exact test path in the existing test project. Do
@@ -60,10 +65,14 @@ stimuli:
       - Clearly distinguished static source-to-test evidence from actual line or branch coverage
 
   - name: Identify an unpaired TypeScript module
+    tags:
+      capability: typescript-import-pairing
+      risk: missed-source-module
+      journey: prioritize-missing-tests
     prompt: |
       Find the untested TypeScript source module under TypeScriptPairing using
       static source-to-test pairing, and suggest a test file location. Return
-      only the pairing result; do not install packages or run tests.
+      only the pairing result; do not install project dependencies or run tests.
     environment:
       files:
         - src: fixtures/typescript-pairing/src/cart/pricing.ts
@@ -72,13 +81,15 @@ stimuli:
           dest: TypeScriptPairing/src/cart/tax.ts
         - src: fixtures/typescript-pairing/tests/cart/pricing.test.ts
           dest: TypeScriptPairing/tests/cart/pricing.test.ts
+      commands:
+        - python -m pip install --quiet tree-sitter-language-pack==1.8.1
     graders:
       - type: output-matches
         config:
           pattern: tax\.ts
       - type: output-matches
         config:
-          pattern: tax\.(test|spec)\.ts
+          pattern: tests[\\/]cart[\\/]tax\.test\.ts
       - type: output-not-matches
         config:
           pattern: (?i)pricing\.ts.{0,100}(untested|unpaired|no test)
@@ -96,10 +107,14 @@ stimuli:
     rubric:
       - Recognized that pricing.ts is paired with pricing.test.ts
       - Identified tax.ts as the only unpaired source module
-      - Suggested a conventional TypeScript test filename for tax.ts without running the test suite
+      - Preserved the analyzer's exact suggested path tests/cart/tax.test.ts without running the test suite
       - Clearly distinguished static source-to-test evidence from actual line or branch coverage
 
   - name: Disambiguate duplicate C# types by nested test namespace
+    tags:
+      capability: nested-namespace-disambiguation
+      risk: namespace-collision
+      journey: locate-untested-sources
     prompt: |
       Find the C# source file under NamespaceCollision that has no test
       referencing its declared Options type. Suggest the exact test path in the
@@ -144,14 +159,21 @@ stimuli:
       - Clearly distinguished static source-to-test evidence from actual line or branch coverage
 
   - name: Exclude generated sources and surface an orphan test
+    tags:
+      capability: generated-source-exclusion
+      risk: generated-code-noise
+      journey: audit-source-test-pairings
     prompt: >
       Which classes under Billing still need unit tests, and is any test file
       not exercising production code at all? Sources are under src/, tests under
-      tests/. Static pairing only — do not build or run the tests.
+      tests/. Run the shipped parse-only analyzer, but do not compile the
+      Billing production project or run its tests.
     environment:
       files:
         - src: fixtures/generated-and-orphan
           dest: .
+      commands:
+        - python -m pip install --quiet tree-sitter-language-pack==1.8.1
     graders:
       - type: output-matches
         config:
@@ -175,10 +197,14 @@ stimuli:
         naming them as generated and skipped is fine, listing them as sources needing tests is not
       - Flagged SmokeEnvironmentTests.cs as an orphan test that references no production type, rather than
         pairing it to a source file
-      - Did not run dotnet build, dotnet restore or dotnet test — this is static pairing analysis
+      - Did not build, restore, or test the Billing production project; launching the shipped parse-only analyzer is expected
       - Labelled the result as static source-to-test pairing rather than line or branch coverage
 
   - name: Pair sources to tests across a src/tests directory split
+    tags:
+      capability: split-layout-pairing
+      risk: missed-test-reference
+      journey: prioritize-missing-tests
     prompt: >
       Which classes in this repository don't have unit tests yet? The sources
       live under src/ and the tests under tests/.
@@ -204,11 +230,15 @@ stimuli:
       - Did not claim a line-coverage percentage; source-to-test pairing is not coverage
 
   - name: Choose the polyglot engine for a mixed C# and TypeScript repository
+    tags:
+      capability: mixed-language-analysis
+      risk: partial-repository-scan
+      journey: audit-polyglot-repository
     prompt: >
       This repository has a C# service under src/Store and a TypeScript cart
       under src/cart, with tests in tests/. Which sources have no tests? Use one
-      analysis pass over the whole repository — do not build, install packages,
-      or run tests.
+      analysis pass over the whole repository — do not build, install project
+      dependencies, or run tests.
     environment:
       files:
         - src: fixtures/pairing-repo
@@ -219,6 +249,8 @@ stimuli:
           dest: src/cart/tax.ts
         - src: fixtures/typescript-pairing/tests/cart/pricing.test.ts
           dest: tests/cart/pricing.test.ts
+      commands:
+        - python -m pip install --quiet tree-sitter-language-pack==1.8.1
     graders:
       - type: output-matches
         config:
@@ -246,15 +278,21 @@ stimuli:
       - Labelled the result a static pairing heuristic rather than line or branch coverage
 
   - name: Pair Python modules through imports and preserve analyzer suggestions
+    tags:
+      capability: python-import-pairing
+      risk: incorrect-test-location
+      journey: plan-python-tests
     prompt: |
       Under PythonPairing/, identify the Python module that has no test referring
       to it. Name the test file that covers the other source module and give the
-      exact suggested path for the missing test. Do not install packages or run
-      the test suite.
+      exact suggested path for the missing test. Do not install project
+      dependencies or run the test suite.
     environment:
       files:
         - src: fixtures/python-pairing
           dest: PythonPairing
+      commands:
+        - python -m pip install --quiet tree-sitter-language-pack==1.8.1
     graders:
       - type: output-matches
         config:
@@ -284,15 +322,21 @@ stimuli:
       - Did not claim that the file relationship proves line or branch coverage
 
   - name: Keep analysis within a named monorepo package
+    tags:
+      capability: package-scoped-analysis
+      risk: out-of-scope-inspection
+      journey: inspect-monorepo-package
     prompt: |
       Only inspect `packages/billing` in this monorepo. Which TypeScript source
       file there has no test referring to it, which source is already paired,
       and where should the missing test go? Do not inspect sibling packages,
-      install dependencies, or run tests.
+      install project dependencies, or run tests.
     environment:
       files:
         - src: fixtures/scoped-monorepo
           dest: Monorepo
+      commands:
+        - python -m pip install --quiet tree-sitter-language-pack==1.8.1
     graders:
       - type: output-matches
         config:
@@ -322,3 +366,71 @@ stimuli:
       - Suggested packages/billing/src/discount.test.ts for the missing test
       - Did not report packages/shipping/src/label.ts because the caller excluded sibling packages
       - Did not run a package manager or claim that the result proves line or branch coverage
+
+  - name: Pair Kotlin Swift PowerShell and C++ sources
+    tags:
+      capability: extended-language-pairing
+      risk: omitted-language-sources
+      journey: audit-polyglot-repository
+    prompt: |
+      Run the shipped static source-to-test pairing analyzer over the
+      PolyglotPairing fixture. Which four source files are unpaired, and which
+      existing tests cover the other four? Include the analyzer's suggested
+      test paths. Do not build or run any language test runner.
+    environment:
+      files:
+        - src: fixtures/polyglot-pairing
+          dest: PolyglotPairing
+      commands:
+        - python -m pip install --quiet tree-sitter-language-pack==1.8.1
+    graders:
+      - type: output-matches
+        config:
+          pattern: src[\\/]kotlin[\\/]DiscountRules\.kt
+      - type: output-matches
+        config:
+          pattern: src[\\/]swift[\\/]TaxPolicy\.swift
+      - type: output-matches
+        config:
+          pattern: src[\\/]powershell[\\/]Discount\.ps1
+      - type: output-matches
+        config:
+          pattern: src[\\/]cpp[\\/]TaxPolicy\.cpp
+      - type: output-matches
+        config:
+          pattern: tests[\\/]kotlin[\\/]DiscountRulesTest\.kt
+      - type: output-matches
+        config:
+          pattern: tests[\\/]swift[\\/]TaxPolicyTests\.swift
+      - type: output-matches
+        config:
+          pattern: tests[\\/]powershell[\\/]Invoice\.Tests\.ps1
+      - type: output-matches
+        config:
+          pattern: tests[\\/]cpp[\\/]TaxPolicy_test\.cpp
+      - type: output-matches
+        config:
+          pattern: InvoiceCalculatorTest\.kt
+      - type: output-matches
+        config:
+          pattern: ReceiptTests\.swift
+      - type: output-matches
+        config:
+          pattern: Receipt_test\.cpp
+      - type: output-matches
+        config:
+          pattern: tests[\\/]powershell[\\/]Discount\.Tests\.ps1
+      - type: output-not-matches
+        config:
+          pattern: (?im)^\s*(?:[$>]\s*)?(?:dotnet|mvn|gradle|swift|pwsh|cmake|ctest)\s+
+      - type: output-matches
+        config:
+          pattern: (?is)(?=.*\bstatic\b)(?=.*\b(?:pairing|heuristic)\b)(?=.*\b(?:line|branch)\b)(?=.*\bcoverage\b)(?=.*\b(?:not|isn't|doesn't|unknown|unverified|cannot)\b)
+      - type: exit-success
+      - type: prompt
+    rubric:
+      - Recognized Kotlin, Swift, PowerShell, and C++ as supported polyglot languages in one analyzer pass
+      - Identified exactly one unpaired source in each language and preserved each suggested test path
+      - Named the paired test files for the other source in each language
+      - Did not build or run any language-specific test command
+      - Distinguished static source-to-test pairing from line or branch coverage

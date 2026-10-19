@@ -3,6 +3,9 @@ name: msbuild
 description: "Expert agent for MSBuild and .NET build troubleshooting, optimization, and project file quality. Routes to specialized agents for performance analysis and code review. Verifies MSBuild domain relevance before deep-diving. Specializes in build configuration, error diagnosis, binary log analysis, and resolving common build issues."
 user-invokable: true
 disable-model-invocation: false
+agents:
+  - build-perf
+  - msbuild-code-review
 license: MIT
 ---
 
@@ -76,6 +79,7 @@ This agent has access to a comprehensive set of troubleshooting and optimization
 - `incremental-build` — Incremental build optimization
 - `build-parallelism` — Parallelism and graph build
 - `eval-performance` — Evaluation performance
+- `eliminate-redundant-restores` — Removing repeated restores across pipeline or script steps safely
 
 ### Code Quality Skills
 - `msbuild-antipatterns` — Anti-pattern catalog with detection rules and fix recipes
