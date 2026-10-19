@@ -260,7 +260,7 @@ int result = handle.Use(myData);
 
 ### Step 7: Handle Errors
 
-Set `LibraryImportAttribute.SetLastError` to `true` when the native API's contract requires capturing the OS last-error value, then retrieve it with `Marshal.GetLastPInvokeError()`. `Marshal.SetLastPInvokeError(int)` explicitly sets the stored error code; it is not an attribute property.
+Set `LibraryImportAttribute.SetLastError` to `true` when the native API's contract requires capturing the OS last-error value, then retrieve it with `Marshal.GetLastPInvokeError()`.
 
 ```csharp
 // Win32 APIs — check SetLastError
@@ -428,7 +428,7 @@ For binding Objective-C libraries (macOS/iOS), use [Objective Sharpie](https://l
 - [ ] Memory ownership is documented and matched (who allocates, who frees, with what)
 - [ ] `SafeHandle` used for all native handles (no raw `IntPtr` escaping the interop layer)
 - [ ] Delegates passed as callbacks are rooted to prevent GC collection
-- [ ] `DllImportAttribute.SetLastError` or `LibraryImportAttribute.SetLastError` set to `true` when the native API requires last-error capture; retrieve the captured code with `Marshal.GetLastPInvokeError()`
+- [ ] `DllImportAttribute.SetLastError` or `LibraryImportAttribute.SetLastError` set to `true` when the native API requires last-error capture
 - [ ] Struct layout matches native (packing, alignment, field order)
 - [ ] `CLong`/`CULong` used for C `long`/`unsigned long` in cross-platform code
 - [ ] If using `CLong`/`CULong` with `LibraryImport`, `[assembly: DisableRuntimeMarshalling]` is applied
