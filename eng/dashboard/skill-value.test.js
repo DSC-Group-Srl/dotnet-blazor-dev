@@ -187,6 +187,28 @@ test('search retains full matched hierarchy without rebuilding the table and pin
   assert.deepEqual(pluginNames(), ['alpha-plugin']);
   assert.equal(visibleRows(wrap, 1).length, 2, 'judge redraw restores the open plugin');
   assert.equal(visibleRows(wrap, 2).length, 0, 'judge redraw restores collapsed skills');
+
+  controls.get('#sv-judge').value = '';
+  controls.get('#sv-judge').dispatch('change');
+  controls.get('#sv-model').value = 'model-a';
+  controls.get('#sv-model').dispatch('change');
+  controls.get('#sv-collapse').dispatch('click');
+  submit('needle');
+  controls.get('#sv-model').value = '';
+  controls.get('#sv-model').dispatch('change');
+  submit('');
+  assert.equal(visibleRows(wrap, 1).length, 0, 'widening executor filter keeps skills collapsed');
+  assert.equal(visibleRows(wrap, 2).length, 0, 'new model rows stay hidden beneath collapsed skills');
+
+  controls.get('#sv-judge').value = 'judge-a';
+  controls.get('#sv-judge').dispatch('change');
+  controls.get('#sv-collapse').dispatch('click');
+  submit('needle');
+  controls.get('#sv-judge').value = '';
+  controls.get('#sv-judge').dispatch('change');
+  submit('');
+  assert.equal(visibleRows(wrap, 1).length, 0, 'widening judge filter keeps skills collapsed');
+  assert.equal(visibleRows(wrap, 2).length, 0, 'new judge rows stay hidden beneath collapsed skills');
 });
 
 test('skill value table uses preference evidence for install guidance', async (t) => {

@@ -748,6 +748,13 @@ if (row.activationContract && (row.activationContract.evaluated !== true || row.
               node.icon?.classList.toggle('expanded', state.expanded);
               if (node.detail) node.detail.style.display = state.detailDisplay;
             }
+            if (!plugin.icon?.classList.contains('expanded')) {
+              collapseChildren(plugin.element.dataset.toggle);
+            } else {
+              for (const skill of plugin.skills) {
+                if (!skill.icon?.classList.contains('expanded')) collapseChildren(skill.element.dataset.toggle);
+              }
+            }
           }
           savedTreeState = null;
         }
