@@ -664,7 +664,7 @@ if (row.activationContract && (row.activationContract.evaluated !== true || row.
     const expand = container.querySelector('#sv-expand');
     const collapse = container.querySelector('#sv-collapse');
     let tree = [];
-    let savedVisibility = null;
+    let savedTreeState = null;
     let searchScheduled = false;
 
     // A Plugin/Skill group-header row. Metric columns are intentionally blank:
@@ -739,28 +739,31 @@ if (row.activationContract && (row.activationContract.evaluated !== true || row.
       const query = search.value.trim().toLowerCase();
       expand.disabled = collapse.disabled = !!query;
       if (!query) {
-        if (savedVisibility) {
-          for (const [element, state] of savedVisibility) {
-            element.style.display = state.display;
-            if (state.expanded != null) element.classList.toggle('expanded', state.expanded);
+        if (savedTreeState) {
+          for (const plugin of tree) {
+            for (const node of [plugin, ...plugin.skills, ...plugin.skills.flatMap(skill => skill.models)]) {
+              const state = savedTreeState.get(node.key);
+              if (!state) continue;
+              node.element.style.display = state.display;
+              node.icon?.classList.toggle('expanded', state.expanded);
+              if (node.detail) node.detail.style.display = state.detailDisplay;
+            }
           }
-          savedVisibility = null;
+          savedTreeState = null;
         }
         empty.style.display = 'none';
         return;
       }
 
-      if (!savedVisibility) {
-        savedVisibility = new Map();
-        for (const plugin of tree) {
-          for (const { element, icon } of [plugin, ...plugin.skills, ...plugin.skills.flatMap(skill => skill.models)]) {
-            savedVisibility.set(element, { display: element.style.display });
-            if (icon) savedVisibility.set(icon, { expanded: icon.classList.contains('expanded') });
-          }
-          for (const skill of plugin.skills) {
-            for (const model of skill.models) {
-              if (model.detail) savedVisibility.set(model.detail, { display: model.detail.style.display });
-            }
+      if (!savedTreeState) savedTreeState = new Map();
+      for (const plugin of tree) {
+        for (const node of [plugin, ...plugin.skills, ...plugin.skills.flatMap(skill => skill.models)]) {
+          if (!savedTreeState.has(node.key)) {
+            savedTreeState.set(node.key, {
+              display: node.element.style.display,
+              expanded: node.icon?.classList.contains('expanded'),
+              detailDisplay: node.detail?.style.display,
+            });
           }
         }
       }
@@ -795,7 +798,6 @@ if (row.activationContract && (row.activationContract.evaluated !== true || row.
 
     function draw() {
       tree = [];
-      savedVisibility = null;
       const fm = modelSel.value, fj = judgeSel.value;
       const rows = allRows.filter(r => (!fm || r.model === fm) && (!fj || r.judge === fj));
       if (rows.length === 0) {
@@ -823,7 +825,7 @@ if (row.activationContract && (row.activationContract.evaluated !== true || row.
         (a === 'agentic-workflows') - (b === 'agentic-workflows') || (a < b ? -1 : a > b ? 1 : 0))) {
         const skills = byPlugin.get(plugin);
         const pid = `svp${uid++}`;
-        const pluginGroup = { name: plugin.toLowerCase(), id: pid, skills: [] };
+        const pluginGroup = { name: plugin.toLowerCase(), key: JSON.stringify(['plugin', plugin]), id: pid, skills: [] };
         groups.push(pluginGroup);
         const pRows = [];
         for (const arr of skills.values()) { for (const r of arr) pRows.push(r); }
@@ -838,7 +840,7 @@ if (row.activationContract && (row.activationContract.evaluated !== true || row.
           const modelRows = skills.get(skill).slice()
             .sort((a, b) => a.model.localeCompare(b.model) || a.judge.localeCompare(b.judge));
           const sid = `svs${uid++}`;
-          const skillGroup = { name: skill.toLowerCase(), id: sid, models: [] };
+          const skillGroup = { name: skill.toLowerCase(), key: JSON.stringify(['skill', plugin, skill]), id: sid, models: [] };
           pluginGroup.skills.push(skillGroup);
           const sRollup = modelRows.length === 1
             ? singleModelRollup(modelRows[0])
@@ -847,7 +849,7 @@ if (row.activationContract && (row.activationContract.evaluated !== true || row.
 
           for (const row of modelRows) {
             const mid = `svm${uid++}`;
-            skillGroup.models.push(mid);
+            skillGroup.models.push({ id: mid, key: JSON.stringify(['model', plugin, skill, row.model, row.judge]) });
             const v = valueSentence(row);
             const costAvailable = costMultiplier(row) != null;
             const diluted = row.activation != null && row.activation < ACTIVATION_MIN;
@@ -875,11 +877,17 @@ if (row.activationContract && (row.activationContract.evaluated !== true || row.
       });
       tree = groups.map(plugin => ({
         name: plugin.name,
+        key: plugin.key,
         ...node(plugin.id),
         skills: plugin.skills.map(skill => ({
           name: skill.name,
+          key: skill.key,
           ...node(skill.id),
-          models: skill.models.map(id => ({ ...node(id), detail: details.get(id) })),
+          models: skill.models.map(model => ({
+            key: model.key,
+            ...node(model.id),
+            detail: details.get(model.id),
+          })),
         })),
       }));
       applySearch();

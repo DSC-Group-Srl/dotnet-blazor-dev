@@ -116,10 +116,10 @@ test('search retains full matched hierarchy without rebuilding the table and pin
     treatment: { n: 5, timeMs: 900, tokens: 90 },
   });
   const entries = [
-    { plugin: 'agentic-workflows', model: 'model-a', date: 1, skills: [skill('workflow')] },
-    { plugin: 'zzz-plugin', model: 'model-a', date: 1, skills: [skill('needle-two')] },
-    { plugin: 'alpha-plugin', model: 'model-a', date: 1, skills: [skill('needle-one'), skill('other')] },
-    { plugin: 'alpha-plugin', model: 'model-b', date: 1, skills: [skill('needle-one'), skill('other')] },
+    { plugin: 'agentic-workflows', model: 'model-a', judgeModel: 'judge-a', date: 1, skills: [skill('workflow')] },
+    { plugin: 'zzz-plugin', model: 'model-a', judgeModel: 'judge-a', date: 1, skills: [skill('needle-two')] },
+    { plugin: 'alpha-plugin', model: 'model-a', judgeModel: 'judge-a', date: 1, skills: [skill('needle-one'), skill('other')] },
+    { plugin: 'alpha-plugin', model: 'model-b', judgeModel: 'judge-b', date: 1, skills: [skill('needle-one'), skill('other')] },
   ];
   const { wrap, controls, frames } = await renderSearchDashboard(t, entries);
   const search = controls.get('#sv-search');
@@ -170,6 +170,23 @@ test('search retains full matched hierarchy without rebuilding the table and pin
   assert.deepEqual(skillNames(), ['needle-one']);
   assert.equal(visibleRows(wrap, 2).length, 1, 'model filter and search intersect');
   assert.equal(wrap.renders, 2, 'only model filter changes rebuild the table');
+  submit('');
+  assert.equal(visibleRows(wrap, 1).length, 0, 'clearing search after a model redraw restores collapsed skills');
+  assert.equal(visibleRows(wrap, 2).length, 0);
+
+  controls.get('#sv-model').value = '';
+  controls.get('#sv-model').dispatch('change');
+  controls.get('#sv-collapse').dispatch('click');
+  const alpha = wrap.rows.find(row => row.classList.contains('level-0') && row.html.includes('alpha-plugin'));
+  alpha.dispatch('click');
+  assert.equal(visibleRows(wrap, 1).length, 2);
+  submit('needle');
+  controls.get('#sv-judge').value = 'judge-b';
+  controls.get('#sv-judge').dispatch('change');
+  submit('');
+  assert.deepEqual(pluginNames(), ['alpha-plugin']);
+  assert.equal(visibleRows(wrap, 1).length, 2, 'judge redraw restores the open plugin');
+  assert.equal(visibleRows(wrap, 2).length, 0, 'judge redraw restores collapsed skills');
 });
 
 test('skill value table uses preference evidence for install guidance', async (t) => {
