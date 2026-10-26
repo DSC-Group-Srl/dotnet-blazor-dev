@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "dotnet-msbuild-binlog": {
+      "command": "dotnet",
+      "args": ["dnx", "Microsoft.AITools.BinlogMcp", "--yes", "--prerelease"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "ms-learn": {
+      "type": "http",
+      "url": "https://learn.microsoft.com/api/mcp"
+    }
+  }
+}
