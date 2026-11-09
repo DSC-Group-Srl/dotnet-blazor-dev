@@ -1,0 +1,64 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd",
+            "args": ["/c", "bash", "${CLAUDE_PLUGIN_ROOT}/tools/dotnet-cli/ensure-dotnet-tools.sh", "SessionStart"],
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "cmd",
+            "args": ["/c", "bash", "${CLAUDE_PLUGIN_ROOT}/tools/rules/precondition_hook.sh", "SessionStart"],
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "& \"${CLAUDE_PLUGIN_ROOT}/tools/environment/git-bash-check.ps1\" SessionStart",
+            "shell": "powershell",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd",
+            "args": ["/c", "bash", "${CLAUDE_PLUGIN_ROOT}/tools/conductor-guard/pretooluse_hook.sh"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'File modified — remember to dotnet build/test before completing phase'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Task complete. Verify Skills Evidencing was declared.'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
