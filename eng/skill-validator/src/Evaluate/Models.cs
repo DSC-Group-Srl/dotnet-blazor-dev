@@ -24,6 +24,12 @@ public enum FailureKind
     [JsonStringEnumMemberName("skill_not_activated")]
     SkillNotActivated,
 
+    [JsonStringEnumMemberName("unexpected_activation")]
+    UnexpectedActivation,
+
+    [JsonStringEnumMemberName("execution_error")]
+    ExecutionError,
+
     [JsonStringEnumMemberName("noise_degradation")]
     NoiseDegradation,
 }
@@ -46,6 +52,9 @@ public enum AssertionType
     RejectTools,
     MaxTurns,
     MaxTokens,
+    ShellDenied,
+    RejectAgents,
+    RejectShellRetries,
 }
 
 public sealed record CommandAssertionArgs(
@@ -56,7 +65,8 @@ public sealed record CommandAssertionArgs(
     string? ExpectedStdErrorContains = null,
     string? ExpectedStdOutMatches = null,
     string? ExpectedStdErrorMatches = null,
-    int? Timeout = null);
+    int? Timeout = null,
+    string[]? ArgumentList = null);
 
 public sealed record Assertion(
     AssertionType Type,
@@ -97,7 +107,11 @@ public sealed record EvalScenario(
     IReadOnlyList<string>? RejectTools = null,
     int? MaxTurns = null,
     int? MaxTokens = null,
-    bool ExpectActivation = true);
+    bool ExpectActivation = true,
+    bool DenyShell = false,
+    IReadOnlyList<string>? RejectAgents = null,
+    bool RejectShellRetries = false,
+    bool OfflineWorkflow = false);
 
 public sealed record EvalConfig(
     IReadOnlyList<EvalScenario> Scenarios,
@@ -115,10 +129,10 @@ public sealed record EvalSkillInfo(
     IReadOnlyDictionary<string, MCPServerDef>? McpServers = null);
 
 /// <summary>
-/// Unified eval target — either a skill or an agent.
+/// Unified eval target — a skill, custom agent, or workflow package.
 /// Most of the evaluation pipeline operates on this generically.
 /// </summary>
-public enum EvalTargetKind { Skill, Agent }
+public enum EvalTargetKind { Skill, Agent, Workflow }
 
 public sealed record EvalTargetInfo(
     string Name,
@@ -129,7 +143,8 @@ public sealed record EvalTargetInfo(
     string? EvalPath,
     EvalConfig? EvalConfig,
     string? PluginRoot,
-    IReadOnlyDictionary<string, MCPServerDef>? McpServers);
+    IReadOnlyDictionary<string, MCPServerDef>? McpServers,
+    WorkflowInfo? Workflow = null);
 
 // --- Agent events ---
 
@@ -180,10 +195,12 @@ public sealed class RunMetrics
     public int TurnCount { get; set; }
     public long WallTimeMs { get; set; }
     public int ErrorCount { get; set; }
+    public int TerminalErrorCount { get; set; }
     public bool TimedOut { get; set; }
     public List<AssertionResult> AssertionResults { get; set; } = [];
     public bool TaskCompleted { get; set; }
     public string AgentOutput { get; set; } = "";
+    public string? WorkflowProposalJson { get; set; }
     public List<AgentEvent> Events { get; set; } = [];
     public string WorkDir { get; set; } = "";
 
@@ -210,10 +227,12 @@ public sealed class RunMetrics
         TurnCount = TurnCount,
         WallTimeMs = WallTimeMs,
         ErrorCount = ErrorCount,
+        TerminalErrorCount = TerminalErrorCount,
         TimedOut = TimedOut,
         AssertionResults = [.. AssertionResults],
         TaskCompleted = TaskCompleted,
         AgentOutput = AgentOutput,
+        WorkflowProposalJson = WorkflowProposalJson,
         Events = [.. Events],
         WorkDir = WorkDir,
     };
@@ -340,6 +359,25 @@ public sealed class ScenarioComparison
 
 public sealed class SkillVerdict
 {
+    private string? _schemaOwner;
+    private int? _schemaVersion;
+
+    /// <summary>
+    /// Identifies this as the retired skill-validator evaluate verdict format,
+    /// not the independently versioned Vally adapter verdict format.
+    /// </summary>
+    public string SchemaOwner
+    {
+        get => _schemaOwner ?? LegacySkillValidatorResultsSchema.Owner;
+        init => _schemaOwner = value;
+    }
+
+    public int? SchemaVersion
+    {
+        get => _schemaVersion ?? LegacySkillValidatorResultsSchema.CurrentVersion;
+        init => _schemaVersion = value;
+    }
+    public string SkillKind { get; set; } = "skill";
     public required string SkillName { get; init; }
     public required string SkillPath { get; init; }
     public required bool Passed { get; set; }
@@ -466,6 +504,20 @@ public sealed record ValidatorConfig
     public string? BaselineFrom { get; init; }
 
     /// <summary>
+    /// When non-empty, evaluate only the named scenarios. Used to re-run a single scenario
+    /// that failed for a transient reason (such as hitting its wall-clock timeout) without
+    /// re-running, and re-charging for, the scenarios that already produced valid evidence.
+    /// </summary>
+    public IReadOnlyList<string> ScenarioFilter { get; init; } = [];
+
+    /// <summary>
+    /// When non-empty, evaluate only the named targets before applying any scenario filter.
+    /// This keeps a targeted scenario retry from selecting a same-named scenario owned by
+    /// another skill or agent in the same invocation.
+    /// </summary>
+    public IReadOnlyList<string> TargetFilter { get; init; } = [];
+
+    /// <summary>
     /// When set, run the requested agent arms and persist sessions/metrics but skip all judging.
     /// Judging is deferred to a later <c>rejudge</c>/<c>judge</c> step. Implies session persistence
     /// and does not require a baseline.
@@ -489,8 +541,34 @@ public static class DefaultWeights
 
 // --- JSON transport types ---
 
+internal static class LegacySkillValidatorResultsSchema
+{
+    internal const string Owner = "skill-validator";
+    internal const int CurrentVersion = 1;
+
+    internal static void EnsureSupported(string? owner, int? version)
+    {
+        // Historical skill-validator results were unversioned. Continue to read
+        // them as the predecessor of the explicit version 1 format.
+        if (owner is null && version is null)
+            return;
+
+        if (!string.Equals(owner, Owner, StringComparison.Ordinal) ||
+            version != CurrentVersion)
+        {
+            throw new InvalidDataException(
+                $"Unsupported results schema owner/version '{owner ?? "(missing)"}'/" +
+                $"'{version?.ToString() ?? "(missing)"}'. This command only reads " +
+                $"legacy {Owner} results version {CurrentVersion}; Vally adapter results " +
+                "use a separate schema.");
+        }
+    }
+}
+
 internal sealed class ConsolidateData
 {
+    public string? SchemaOwner { get; set; }
+    public int? SchemaVersion { get; set; }
     public string? Model { get; set; }
     public string? JudgeModel { get; set; }
     public List<SkillVerdict>? Verdicts { get; set; }
@@ -498,6 +576,8 @@ internal sealed class ConsolidateData
 
 internal sealed class ResultsOutput
 {
+    public string SchemaOwner { get; init; } = LegacySkillValidatorResultsSchema.Owner;
+    public int SchemaVersion { get; init; } = LegacySkillValidatorResultsSchema.CurrentVersion;
     public required string Model { get; init; }
     public required string JudgeModel { get; init; }
     public required string Timestamp { get; init; }
