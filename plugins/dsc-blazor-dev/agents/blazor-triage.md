@@ -38,3 +38,10 @@ You diagnose existing bugs/regressions/incidents in Blazor/.NET applications. Yo
 - **Fix touches multiple components/needs tests** → Task tool → `blazor-conductor`: "TDD-implement fix for: {root cause}"
 
 CRITICAL: NEVER auto-delegate. Present your diagnosis and wait for explicit approval before handing off.
+
+## Large files
+
+Never load a source file over ~350 lines whole: the read-guard denies it in a project
+initialized with this plugin. `Grep` for the class or method and `Read` with `offset`/`limit`,
+or ask `blazor-file-reader` for the exact ranges. Editing never needs a full read. Never create
+a git branch yourself.

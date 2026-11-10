@@ -1,0 +1,474 @@
+#!/usr/bin/env python3
+"""Extract blazor-dev quality metrics from a SubagentStop payload.
+
+Reads the hook JSON on stdin, matches the symbolic markers the blazor-dev agents emit, and appends
+one JSONL record. Called by capture_subagent.sh; not meant to be run by hand except for
+testing (`--self-test`).
+
+PRIVACY IS THE POINT, so it is enforced here rather than trusted: the record is assembled
+field by field from regex captures, never by copying any part of the message. The only
+free-text that can reach the file is a BCQuality knowledge path — public Microsoft content,
+shape-validated below — and an enum-checked verdict. No message body, no customer AL, no
+repo paths, no full cwd.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+
+SCHEMA = 3  # 2: adds the `usage` block (tokens, turns, tools, reads) and every blazor-dev agent
+#             3: adds req/runId/attempt of the conductor run live in the session
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import usage as usage_mod  # noqa: E402
+
+# Only our own agents. agent_type arrives as "plugin_<plugin>:<agent>" for plugin agents, so
+# match on the suffix.
+TRACKED = ("blazor-review-subagent", "blazor-implement-subagent", "blazor-audit", "blazor-planning-subagent")
+
+# --- markers -----------------------------------------------------------------------------
+# Implementer symbolic line:  📐 instr ✓ · 📚 bcq 5/6 applied · 🧠 …
+RE_IMPL = re.compile(r"📚\s*bcq\s+(\d+)\s*/\s*(\d+)\s+applied")
+RE_IMPL_NONE = re.compile(r"📚\s*bcq\s*(?:·\s*)?none")
+# Review accounting: 📚 6 prescribed · 5 applied · 1 deviated (0 undeclared) · 3 newly cited · 2 agent findings
+RE_REV = re.compile(
+    r"📚\s*(\d+)\s+prescribed\s*·\s*(\d+)\s+applied\s*·\s*(\d+)\s+deviated\s*"
+    r"\((\d+)\s+undeclared\)\s*·\s*(\d+)\s+newly\s+cited\s*·\s*(\d+)\s+agent\s+findings"
+)
+RE_INDEP = re.compile(r"🧭\s*independence-ratio:\s*(\d+)\s*/\s*(\d+)")
+RE_NOT_MOUNTED = re.compile(r"⚪\s*BCQuality\s+not\s+mounted", re.I)
+RE_MOUNTED_SHA = re.compile(r"🟢\s*BCQuality[^\n]*?\b([0-9a-f]{7,40})\b")
+RE_PHASE = re.compile(r"(?:Phase|Fase)\s+(\d+)\b", re.I)
+RE_VERDICT = re.compile(
+    r"\b(APPROVED_WITH_RECOMMENDATIONS|APPROVED|NEEDS_REVISION|FAILED|"
+    r"PASS_WITH_FINDINGS|CONCERNS|PASS)\b"
+)
+VERDICTS = {
+    "APPROVED", "APPROVED_WITH_RECOMMENDATIONS", "NEEDS_REVISION", "FAILED",
+    "PASS", "PASS_WITH_FINDINGS", "CONCERNS",
+}
+RE_SEVERITY = re.compile(r"\*\*\[(CRITICAL|MAJOR|MINOR)\]\*\*")
+# Deviations block: everything between the heading and the next heading.
+RE_DEV_BLOCK = re.compile(r"###\s*Knowledge Deviations(.*?)(?:\n#{1,3}\s|\Z)", re.S)
+RE_DEV_NONE = re.compile(r"^\s*[-*]?\s*none\s*$", re.I | re.M)
+
+# A BCQuality knowledge path and nothing else. Anchored to the three layer roots so a
+# customer file path can never be mistaken for one.
+RE_KNOWLEDGE = re.compile(
+    r"\b((?:microsoft|community|custom)/knowledge/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*\.md)\b"
+)
+
+MAX_KNOWLEDGE = 40  # a record is a measurement, not an archive
+
+
+def utcnow() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def plugin_version() -> str:
+    """blazor-dev's own version, read from the plugin manifest two directories up (this file
+    lives at claude-plugin/tools/metrics/, the manifest at claude-plugin/.claude-plugin/).
+    Best-effort: an unreadable or malformed manifest yields an empty string, never a hard
+    failure — a version tag is a nice-to-have on a metrics record, not a precondition for it.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.normpath(os.path.join(here, "..", "..", ".claude-plugin", "plugin.json"))
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return str(json.load(fh).get("version", ""))
+    except (OSError, ValueError):
+        return ""
+
+
+def short_agent(agent_type: str) -> str | None:
+    """'plugin_blazor-dev:blazor-review-subagent' -> 'blazor-review-subagent', if we track it."""
+    tail = agent_type.split(":")[-1].strip() if agent_type else ""
+    return tail if tail in TRACKED else None
+
+
+def transcript_path(payload: dict) -> str:
+    """The subagent's own transcript. Newer harnesses pass it; otherwise it sits beside the
+    parent transcript as <parent-stem>/subagents/agent-<agent_id>.jsonl (checked on disk)."""
+    p = str(payload.get("agent_transcript_path") or "")
+    if p:
+        return p
+    parent, aid = str(payload.get("transcript_path") or ""), str(payload.get("agent_id") or "")
+    if parent and aid:
+        return os.path.join(os.path.splitext(parent)[0], "subagents", f"agent-{aid}.jsonl")
+    return ""
+
+
+JUST_FINISHED_S = 900.0  # the conductor stops minutes after its own BlzRun closed the run
+
+
+def live_run(session_id: str, agent: str = "") -> dict:
+    """req/runId/attempt of the conductor run live in this session, from emit.py's snapshot —
+    keyed by the FULL session id (the record itself keeps only 8 chars). Tokens of a phase can
+    then be summed per task. Empty when no run is live; never raises.
+
+    The conductor's own stop comes AFTER it emitted BlzRun (which closes the run), so for
+    blazor-conductor a run that finished in the last JUST_FINISHED_S still counts: its phase is the
+    most expensive one of the run and was the one left out."""
+    try:
+        import emit
+        import ident
+
+        # The payload's own id only — no fallback to the environment's session.
+        sid = session_id if ident.RE_SESSION.match(session_id or "") else ""
+        snap = emit.load_live(sid) if sid else {}
+    except Exception:
+        return {}
+    if not snap.get("runId"):
+        return {}
+    if snap.get("outcome"):
+        import time
+
+        ended = snap.get("endedAt")
+        recent = isinstance(ended, (int, float)) and 0 <= time.time() - ended <= JUST_FINISHED_S
+        if not (agent == "blazor-conductor" and recent):
+            return {}
+    out = {k: str(snap[k]) for k in ("req", "runId")
+           if snap.get(k) and emit.RE_TOKEN.match(str(snap[k]))}
+    if "runId" in out and isinstance(snap.get("attempt"), int):
+        out["attempt"] = snap["attempt"]
+    return out
+
+
+def build_record(payload: dict) -> dict | None:
+    raw_agent = str(payload.get("agent_type", ""))
+    agent = short_agent(raw_agent)
+    # Efficiency is measured for every subagent — ours by name, anything else as "other" —
+    # while the semantic (BCQuality/verdict) parse below stays limited to TRACKED agents.
+    usage_agent = usage_mod.allow_agent(raw_agent)
+    if not agent and not usage_agent:
+        return None
+
+    msg = payload.get("last_assistant_message") or ""
+    if not isinstance(msg, str):
+        msg = ""
+    u = None
+    tp = transcript_path(payload)
+    if tp:
+        u = usage_mod.summarize(tp)
+    if not msg and not u:
+        return None
+
+    rec: dict = {
+        "schema": SCHEMA,
+        "ts": utcnow(),
+        # Truncated: enough to correlate records from one run, not enough to identify it.
+        "session": str(payload.get("session_id", ""))[:8],
+        # A name (app.json name, repo folder) — never a path into someone's filesystem.
+        "project": usage_mod.project_name(str(payload.get("cwd", ""))),
+        "agent": agent or usage_agent,
+    }
+    import ident
+
+    rec["ident"] = ident.props(str(payload.get("session_id", "")))
+    ph = usage_mod.project_hash(str(payload.get("cwd", "")))
+    if ph:
+        rec["projectHash"] = ph
+    if u:
+        rec["usage"] = u
+    v = plugin_version()
+    if v:
+        rec["pluginVersion"] = v
+    rec.update(live_run(str(payload.get("session_id", "")), agent or usage_agent or ""))
+
+    if not agent:  # not one of the semantically-parsed agents: usage only
+        return rec if u else None
+
+    m = RE_PHASE.search(msg)
+    if m:
+        rec["phase"] = int(m.group(1))
+
+    bcq: dict = {}
+    if RE_NOT_MOUNTED.search(msg):
+        bcq["mounted"] = False
+    else:
+        m = RE_MOUNTED_SHA.search(msg)
+        if m:
+            bcq["mounted"] = True
+            bcq["sha"] = m.group(1)
+
+    m = RE_REV.search(msg)
+    if m:
+        p, a, d, u, c, g = (int(x) for x in m.groups())
+        bcq.update({"prescribed": p, "applied": a, "deviated": d,
+                    "undeclared": u, "cited": c, "agent_findings": g})
+        bcq.setdefault("mounted", True)
+    elif (m := RE_IMPL.search(msg)):
+        a, p = int(m.group(1)), int(m.group(2))
+        bcq.update({"prescribed": p, "applied": a, "deviated": max(p - a, 0)})
+        bcq.setdefault("mounted", True)
+    elif RE_IMPL_NONE.search(msg):
+        bcq.update({"prescribed": 0, "applied": 0, "deviated": 0})
+
+    m = RE_INDEP.search(msg)
+    if m:
+        num, den = int(m.group(1)), int(m.group(2))
+        bcq["agent_findings"] = num
+        bcq["total_findings"] = den
+        bcq["independence_ratio"] = round(num / den, 3) if den else None
+
+    if bcq:
+        rec["bcq"] = bcq
+
+    sev = RE_SEVERITY.findall(msg)
+    if sev:
+        rec["findings"] = {
+            "critical": sev.count("CRITICAL"),
+            "major": sev.count("MAJOR"),
+            "minor": sev.count("MINOR"),
+        }
+
+    m = RE_VERDICT.search(msg)
+    if m and m.group(1) in VERDICTS:
+        rec["verdict"] = m.group(1)
+
+    # Declared deviations: count them, and keep the knowledge paths they name.
+    m = RE_DEV_BLOCK.search(msg)
+    if m:
+        block = m.group(1)
+        declared = [] if RE_DEV_NONE.search(block) else RE_KNOWLEDGE.findall(block)
+        rec["deviations_declared"] = sorted(set(declared))
+        if "bcq" in rec:
+            rec["bcq"]["declared"] = len(set(declared))
+
+    cited = sorted(set(RE_KNOWLEDGE.findall(msg)))
+    if cited:
+        rec["knowledge"] = cited[:MAX_KNOWLEDGE]
+        if len(cited) > MAX_KNOWLEDGE:
+            rec["knowledge_truncated"] = len(cited) - MAX_KNOWLEDGE
+
+    # A record with no BCQuality signal and no findings measures nothing — don't store noise.
+    if "bcq" not in rec and "findings" not in rec and "verdict" not in rec and "usage" not in rec:
+        return None
+    return rec
+
+
+def append_jsonl(path: str, rec: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def project_lane(cwd: str) -> str | None:
+    """Opt-in by existence: we write there only if the directory is already present."""
+    if not cwd:
+        return None
+    d = os.path.join(cwd, ".github", "metrics")
+    return os.path.join(d, "blz-metrics.jsonl") if os.path.isdir(d) else None
+
+
+def appinsights_lane(rec: dict, log) -> None:
+    """Azure Application Insights, the enterprise lane. Always on: appinsights.py resolves
+    the connection string itself (env var, else the shipped appinsights.connection) and the
+    per-machine BLZ_METRICS_APPINSIGHTS_DISABLE switch still wins over both."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import appinsights
+
+        appinsights.send(rec, log=log)
+    except Exception as exc:  # a telemetry lane must never disturb a session
+        log(f"appinsights lane failed (non-fatal): {type(exc).__name__}")
+
+
+def endpoint_lane(rec: dict, log) -> None:
+    """A plain webhook, for anyone who wants the record somewhere that is not App Insights.
+    Opt-in by configuration; no secret ships in the plugin."""
+    url = os.environ.get("BLZ_METRICS_ENDPOINT", "").strip()
+    if not url:
+        return
+    if not url.startswith("https://"):
+        log(f"endpoint lane skipped: refusing non-https endpoint {url[:40]}")
+        return
+    try:
+        import urllib.request
+
+        body = json.dumps(rec, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        tok = os.environ.get("BLZ_METRICS_TOKEN", "").strip()
+        if tok:
+            req.add_header("Authorization", f"Bearer {tok}")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            log(f"endpoint lane {resp.status}")
+    except Exception as exc:  # never let the network fail a session
+        log(f"endpoint lane failed (non-fatal): {type(exc).__name__}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", required=False, default="")
+    ap.add_argument("--log", required=False, default="")
+    ap.add_argument("--self-test", action="store_true")
+    args = ap.parse_args()
+
+    if args.self_test:
+        return self_test()
+
+    def log(msg: str) -> None:
+        if not args.log:
+            return
+        try:
+            os.makedirs(os.path.dirname(args.log), exist_ok=True)
+            with open(args.log, "a", encoding="utf-8") as fh:
+                fh.write(f"{utcnow()} {msg}\n")
+        except OSError:
+            pass
+
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except (ValueError, OSError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+
+    # Only sessions in a .NET workspace: bc-dev and other plugins report their own.
+    if not usage_mod.is_dotnet_workspace(str(payload.get("cwd", ""))):
+        return 0
+
+    rec = build_record(payload)
+    if rec is None:
+        return 0
+
+    if args.out:
+        try:
+            append_jsonl(args.out, rec)
+        except OSError as exc:
+            log(f"plugin-data lane failed: {type(exc).__name__}")
+
+    lane = project_lane(str(payload.get("cwd", "")))
+    if lane:
+        try:
+            # The project lane lives in the customer repo and can be committed: no identity.
+            append_jsonl(lane, {k: v for k, v in rec.items() if k != "ident"})
+        except OSError as exc:
+            log(f"project lane failed: {type(exc).__name__}")
+
+    appinsights_lane(rec, log)
+    endpoint_lane(rec, log)
+    return 0
+
+
+def self_test() -> int:
+    """Exercised by tools/metrics/test_parse.sh; keep the fixtures honest."""
+    review = (
+        "## Code Review: Phase 3\n\n**Status:** APPROVED_WITH_RECOMMENDATIONS\n\n"
+        "**BCQuality accounting:**\n"
+        "`📚 6 prescribed · 5 applied · 1 deviated (0 undeclared) · 3 newly cited · 2 agent findings`\n"
+        "`🧭 independence-ratio: 2/7`\n"
+        "🟢 BCQuality ad8ccde\n"
+        "- **[MAJOR]** something at App/Src/Secret.Codeunit.al:42\n"
+        "- **[MINOR]** other\n"
+        "cites microsoft/knowledge/events/add-new-event-parameters-at-the-end.md and "
+        "custom/knowledge/style/dsc-prefix.md\n"
+    )
+    impl = (
+        "## Phase 2 Implementation Summary\n"
+        "📐 instr ✓ · 📚 bcq 4/5 applied · 🧠 skill-events·EventSub\n"
+        "### Knowledge Deviations\n"
+        "- `microsoft/knowledge/performance/use-setloadfields-for-partial-records.md` — table has 6 fields\n"
+        "### Objects Created\n- Codeunit 50100\n"
+    )
+    ok = True
+
+    r = build_record({"agent_type": "plugin_blazor-dev:blazor-review-subagent",
+                      "session_id": "abcdef1234", "cwd": "/home/x/CustomerProj",
+                      "last_assistant_message": review})
+    checks = [
+        ("review parsed", r is not None),
+        ("phase", r and r.get("phase") == 3),
+        ("project basename only", r and r.get("project") == "CustomerProj"),
+        ("prescribed", r and r["bcq"]["prescribed"] == 6),
+        ("undeclared", r and r["bcq"]["undeclared"] == 0),
+        ("independence", r and r["bcq"]["independence_ratio"] == round(2 / 7, 3)),
+        ("sha", r and r["bcq"]["sha"] == "ad8ccde"),
+        ("verdict", r and r["verdict"] == "APPROVED_WITH_RECOMMENDATIONS"),
+        ("severities", r and r["findings"] == {"critical": 0, "major": 1, "minor": 1}),
+        ("knowledge captured", r and len(r["knowledge"]) == 2),
+        ("NO customer path leaked", r and "Secret.Codeunit.al" not in json.dumps(r)),
+        ("NO message body leaked", r and "something at" not in json.dumps(r)),
+    ]
+
+    r2 = build_record({"agent_type": "blazor-implement-subagent", "session_id": "s",
+                       "cwd": "/p/Proj", "last_assistant_message": impl})
+    checks += [
+        ("impl parsed", r2 is not None),
+        ("plugin_version present on records", r2 and "pluginVersion" in r2),
+        ("impl applied/prescribed", r2 and r2["bcq"]["applied"] == 4 and r2["bcq"]["prescribed"] == 5),
+        ("impl deviated derived", r2 and r2["bcq"]["deviated"] == 1),
+        ("impl declared", r2 and r2["bcq"]["declared"] == 1),
+        ("impl deviation path", r2 and r2["deviations_declared"][0].endswith("use-setloadfields-for-partial-records.md")),
+    ]
+
+    import tempfile
+    tdir = tempfile.mkdtemp()
+    sub = os.path.join(tdir, "sess", "subagents")
+    os.makedirs(sub)
+    with open(os.path.join(sub, "agent-abc.jsonl"), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "assistant", "requestId": "r", "timestamp": "2026-01-01T00:00:00Z",
+                             "message": {"model": "claude-haiku-4-5", "usage": {"input_tokens": 3, "output_tokens": 4},
+                                         "content": [{"type": "tool_use", "id": "x", "name": "Grep",
+                                                      "input": {"pattern": "SecretCustomerName"}}]}}) + "\n")
+    r3 = build_record({"agent_type": "plugin_blazor-dev:blazor-file-reader", "agent_id": "abc",
+                       "transcript_path": os.path.join(tdir, "sess.jsonl"), "cwd": tdir,
+                       "last_assistant_message": "- path:1-2 — x"})
+    r4 = build_record({"agent_type": "Explore", "agent_id": "abc",
+                       "transcript_path": os.path.join(tdir, "sess.jsonl"), "last_assistant_message": ""})
+    checks += [
+        ("usage record for untracked blazor-dev agent", r3 is not None and r3["agent"] == "blazor-file-reader"),
+        ("usage tokens", r3 and r3["usage"]["tokens"]["output"] == 4),
+        ("foreign agent recorded as other", r4 is not None and r4["agent"] == "other"),
+        ("NO grep pattern leaked", r3 and "SecretCustomerName" not in json.dumps(r3)),
+    ]
+
+    # A phase inside a live conductor run carries the run's key, read from the snapshot under
+    # the FULL session id even though the record keeps only 8 chars.
+    live_backup = os.environ.get("BLZ_LIVE_DIR")
+    os.environ["BLZ_LIVE_DIR"] = os.path.join(tdir, "live")
+    try:
+        import emit
+
+        full = "20a903ef-52d2-48d7-b681-990ce2056020"
+        emit.save_live(full, {"req": "U-04", "runId": "0123456789", "attempt": 2})
+        r5 = build_record({"agent_type": "blazor-implement-subagent", "session_id": full,
+                           "cwd": "/p/Proj", "last_assistant_message": impl})
+        emit.save_live(full, {"req": "U-04", "runId": "0123456789", "attempt": 2, "outcome": "done"})
+        r6 = build_record({"agent_type": "blazor-implement-subagent", "session_id": full,
+                           "cwd": "/p/Proj", "last_assistant_message": impl})
+        emit.save_live(full, {"req": "C:/Customer/x.al", "runId": "0123456789", "attempt": 1})
+        r7 = build_record({"agent_type": "blazor-implement-subagent", "session_id": full,
+                           "cwd": "/p/Proj", "last_assistant_message": impl})
+    finally:
+        if live_backup is None:
+            os.environ.pop("BLZ_LIVE_DIR", None)
+        else:
+            os.environ["BLZ_LIVE_DIR"] = live_backup
+    checks += [
+        ("phase keyed to the live run", r5 and (r5.get("req"), r5.get("runId"), r5.get("attempt"))
+         == ("U-04", "0123456789", 2) and r5["session"] == full[:8]),
+        ("no run key once the run is closed", r6 and "runId" not in r6),
+        ("NO path-shaped req leaked from the snapshot", r7 and "Customer" not in json.dumps(r7)),
+        ("no live run -> no run key", "runId" not in r2),
+    ]
+
+    checks.append(("untracked agent ignored",
+                   build_record({"agent_type": "Explore", "last_assistant_message": review}) is None))
+    checks.append(("noise record dropped",
+                   build_record({"agent_type": "blazor-audit", "last_assistant_message": "hello"}) is None))
+
+    for name, passed in checks:
+        print(f"  {'PASS' if passed else 'FAIL'}  {name}")
+        ok = ok and bool(passed)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

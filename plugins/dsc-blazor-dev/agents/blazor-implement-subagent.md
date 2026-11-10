@@ -38,3 +38,10 @@ Apply the always-on rules from `.claude/rules/` (or `rules-templates/` if not in
 ```
 
 If you cannot produce a passing test suite for this phase, report that honestly rather than returning code without tests — zero tests means the phase is not complete.
+
+## Large files
+
+Never load a source file over ~350 lines whole: the read-guard denies it in a project
+initialized with this plugin. `Grep` for the class or method and `Read` with `offset`/`limit`,
+or ask `blazor-file-reader` for the exact ranges. Editing never needs a full read. Never create
+a git branch yourself.

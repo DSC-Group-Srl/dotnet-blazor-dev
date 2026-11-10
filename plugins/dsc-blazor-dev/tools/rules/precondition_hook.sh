@@ -6,8 +6,12 @@
 # directive into the agent session via additionalContext. Same
 # precondition-hook design as bc-dev's tools/rules/precondition_hook.sh.
 #
-# Wired from hooks/hooks.json on SessionStart.
+# Run on SessionStart by tools/hooks/sessionstart.sh. Silent outside a .NET workspace: the
+# plugin is often enabled next to bc-dev or nav-dev, whose sessions need no C# rules nudge.
 set -euo pipefail
+
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../hooks" 2>/dev/null && pwd)/lib.sh" 2>/dev/null || true
+if command -v blz_is_dotnet_ws >/dev/null 2>&1 && ! blz_is_dotnet_ws; then exit 0; fi
 
 EVENT="${1:-SessionStart}"
 MARKER=".claude/rules/csharp-guidelines.md"

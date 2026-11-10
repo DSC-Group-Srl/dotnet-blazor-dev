@@ -38,3 +38,10 @@ Structured findings only — no plan, no recommendations beyond "here's what exi
 ```
 
 Do not create files. Do not implement. Return findings to the Conductor and stop.
+
+## Large files
+
+Never load a source file over ~350 lines whole: the read-guard denies it in a project
+initialized with this plugin. `Grep` for the class or method and `Read` with `offset`/`limit`,
+or ask `blazor-file-reader` for the exact ranges. Editing never needs a full read. Never create
+a git branch yourself.

@@ -50,3 +50,10 @@ Load skills matching the domain of the code under audit (`skill-multitenancy`, `
 
 - ❌ Don't fix anything — hand findings to `blazor-developer`/`blazor-conductor`
 - ❌ Don't flag stylistic preferences not backed by a loaded skill/rule — cite what you're grounding the finding in
+
+## Large files
+
+Never load a source file over ~350 lines whole: the read-guard denies it in a project
+initialized with this plugin. `Grep` for the class or method and `Read` with `offset`/`limit`,
+or ask `blazor-file-reader` for the exact ranges. Editing never needs a full read. Never create
+a git branch yourself.

@@ -1,0 +1,1441 @@
+#!/usr/bin/env python3
+"""Emit one blazor-dev efficiency event from a script or an agent's Bash call.
+
+    python emit.py BlzRun  tier=MEDIUM wps=3 waves=2 fixLoops=1 stops=3 lane=ran \
+                            testsPassed=12 testsFailed=0 --numstat-base <git-ref>
+    python emit.py BlzLane result=ran lockWaitS=4.2 publishS=31 runS=18 passed=12 failed=0
+    python emit.py BlzRead action=blocked lines=1840 chars=90211
+    python emit.py BlzHook hook=read-guard decision=deny ms=41
+    python emit.py BlzHook hook=freshdesk-guard decision=ask tool=createTicketNote calls=2
+    python emit.py BlzIssue issueNo=<entryNo> source=<spec|user|freshdesk|history|branch>
+
+`BlzIssue` links the SESSION to a DSC Business Central Issue (its entryNo): from then on every
+event of the session - runs, phases, the session total - carries `issueNo` (ident.py), so
+effort joins to the Issue's estimated and actual hours. `issueNo=0` clears the link. Digits
+only: no description, customer or project ever travels with it.
+
+The script reads the spec, the model does not have to remember:
+
+    python emit.py BlzIssue --from-branch      (SessionStart hook, tools/issue/link_hook.sh)
+
+finds the in-progress spec whose `**Branch:**` is the checked-out branch, links the session to
+its `**BC Issue:** <entryNo>` and prints `issue=<n>` | `issue=none` (the spec says none) |
+`issue=missing` (a spec without the line) | `issue=nospec`. BlzRunStart and BlzEstimate do
+the same from `req`, and BlzEstimate also takes `estP50Min`/`estP80Min`/`estSource` from the
+spec's `**Agent estimate:** P50 <n> min · P80 <n> min (<source>)` line when the caller passed none.
+
+Live progress (blazor-conductor), read by the GITCloner control panel:
+
+    python emit.py BlzRunStart req=<req> tier=MEDIUM wpsPlanned=3 waves=2 lane=ran
+    python emit.py BlzWave stage=start wave=1 waves=2 wps=2
+    python emit.py BlzWp   stage=start wave=1 wp=1
+    python emit.py BlzWp   stage=end   wave=1 wp=1 result=done
+    python emit.py BlzWave stage=end   wave=1 waves=2 verdict=APPROVED lane=ran passed=14 failed=0
+    python emit.py BlzAlive agent=blazor-implement-subagent tool=Bash        (the alive hook)
+    python emit.py BlzGate  gate=fixloop                 (right before a mid-run stop-and-ask)
+
+Ex-ante scope, once per run, right after BlzRunStart (counts parsed from the plan, not
+counted by the model):
+
+    python emit.py BlzEstimate --plan <path-to-plan.md> [estP50Min=<n> estP80Min=<n>
+                                estSource=<stima-sviluppo|manual|none> issueNo=<no> model=<id>]
+
+Every event of a run carries `req` and `runId` without the conductor repeating them: they are
+kept in a per-session LIVE SNAPSHOT, `~/.claude/blz-plugin-data/live/<session>.json`, which
+this script updates on each live event. The snapshot also supplies durations (`durationS` on a
+`stage=end` that does not pass one) and the run's MEASURED duration: `wallMinutes` is always
+computed from the snapshot (a value the conductor passes is kept as `reportedMinutes`), and
+`activeSeconds` sums the gaps between the run's events: inside an open wave or WP in full (up
+to OPEN_CAP_S — a compile or a lane run sends no event), between steps capped at IDLE_CAP_S,
+so a session left open overnight does not count as work. An `BlzGate` marks a human ask: the
+gap after it goes to `humanWaitSeconds` instead.
+
+Resumes: `runId` is stable per project:req:user, so a run resumed in a new session keeps it.
+The ATTEMPT REGISTRY (`runs.json`, beside the live directory) counts the sessions a run took
+(`attempt` on every run event), sums active time across them (`activeSecondsTotal` on
+BlzRun) and drops a second BlzRun for an attempt that already has an outcome. A req started
+again after its run finished `done` is a REWORK: its own runId and `rework=<n>`.
+The snapshot never leaves the machine; it is what a local panel reads with no latency, while
+Application Insights carries the same events to the team view.
+
+Writes the record to the plugin-data JSONL (the same file parse_subagent.py appends to, so
+/al-metrics sees everything in one place) and sends it to Application Insights through
+`appinsights.send_event()` — resolved the same way as every other event, including the
+per-machine BLZ_METRICS_APPINSIGHTS_DISABLE kill switch.
+
+PRIVACY: only the event names and keys allowlisted below are accepted. A numeric value
+becomes a measurement; a string value is accepted only for the enum-like keys and only when
+it matches a short token shape — so a path, a message or a command line can never be passed
+through, even by mistake. `--numstat-base` reduces `git diff --numstat` to totals in-process,
+and the object kind of each changed .al file to a count per kind; no file name is ever kept.
+`--plan` reduces the plan to fixed, allowlisted counts the same way.
+`BLZ_METRICS_EXCLUDE=1` marks every event `exclude=true` (dry runs, demos, self-tests).
+Identity (ident.py) adds a user hash, the e-mail's local part, a machine hash and the session
+prefix.
+
+Never fails the caller: any problem exits 0 with nothing sent.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+SCHEMA = 3  # 3: measured wallMinutes + reportedMinutes, activeSeconds, attempt, BlzEstimate,
+#             objDone_* per kind, codeAddedTest/codeAddedProd, `schema` and `exclude` dimensions
+IDLE_CAP_S = 600.0    # a gap between steps longer than this is idle, not work
+OPEN_CAP_S = 7200.0   # a gap inside an open wave/WP counts in full, up to this
+GATE_GRACE_S = 60.0   # a conductor heartbeat this soon after a gate is the ask itself, not a resume
+
+RUN_KEYS = {"req", "runId"}
+EVENTS: dict[str, set[str]] = {
+    # wallMinutes is still accepted from the conductor (older agent prompts pass it), but it
+    # is kept as reportedMinutes; the wallMinutes that is sent is always measured.
+    "BlzRun": {"tier", "wpsPlanned", "wps", "waves", "fixLoops", "stops", "lane",
+                "testsPassed", "testsFailed", "reviewFirstPass", "reviews", "parallelism",
+                "wallMinutes", "outcome"} | RUN_KEYS,
+    # Everything else on BlzEstimate is parsed from --plan, never taken from the caller.
+    "BlzEstimate": {"tier", "model", "estP50Min", "estP80Min", "estSource", "issueNo"} | RUN_KEYS,
+    "BlzGate": {"gate"} | RUN_KEYS,
+    "BlzLane": {"result", "lockWaitS", "publishS", "runS", "passed", "failed", "errored",
+                 "skipped", "staleRecovered", "wave", "envType"} | RUN_KEYS,
+    "BlzRead": {"action", "lines", "chars", "threshold"},
+    # tool/calls: freshdesk-guard reports the allowlisted Freshdesk tool name (or "other") and
+    # the session's call count - never a ticket id, text or tool_input.
+    "BlzHook": {"hook", "decision", "ms", "tool", "calls"},
+    # The session's link to a DSC BC Issue: the entryNo (digits) and where the link came from.
+    "BlzIssue": {"issueNo", "source"},
+    "BlzRunStart": {"tier", "wpsPlanned", "waves", "lane"} | RUN_KEYS,
+    "BlzWave": {"stage", "wave", "waves", "wps", "verdict", "lane", "passed", "failed",
+                 "fixLoops", "durationS"} | RUN_KEYS,
+    "BlzWp": {"stage", "wave", "wp", "result", "fixRound", "durationS"} | RUN_KEYS,
+    "BlzAlive": {"agent", "tool"} | RUN_KEYS,
+}
+LIVE_EVENTS = {"BlzRunStart", "BlzWave", "BlzWp", "BlzRun", "BlzLane", "BlzEstimate",
+               "BlzGate"}
+# Events that advance a live run's active-time clock (BlzAlive included: it is the only
+# signal while subagents work between two conductor events).
+TICK_EVENTS = LIVE_EVENTS | {"BlzAlive"}
+STRING_KEYS = {"tier", "lane", "outcome", "result", "action", "hook", "decision", "envType",
+               "stage", "verdict", "req", "runId", "agent", "tool", "model", "estSource",
+               "issueNo", "gate", "source"}
+# String keys whose value must also come from a closed set.
+ENUM_VALUES = {"estSource": {"stima-sviluppo", "manual", "none"},
+               "source": {"spec", "user", "freshdesk", "history", "branch"},
+               "gate": {"fixloop", "conflict", "stall", "blocked", "contradiction", "other", "autostop"}}
+RE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,40}$")
+RE_NUM = re.compile(r"^-?\d+(?:\.\d+)?$")
+# Keys that stay strings even when they look numeric (a req called "042", an Issue "1234").
+NEVER_NUMERIC = {"req", "runId", "issueNo"}
+
+# AL object kinds, shared by the ex-ante plan table (obj_<kind>_new|ext on BlzEstimate) and the
+# ex-post diff (objDone_<kind>_new|ext on BlzRun). A fixed set, so the keys are allowlisted by
+# construction; anything else is "other".
+OBJ_KINDS = ("table", "tableextension", "page", "pageextension", "codeunit", "report",
+             "reportextension", "query", "xmlport", "enum", "enumextension", "interface",
+             "permissionset", "apipage", "testcodeunit", "other",
+             # .NET kinds, by file: a routable .razor, any other .razor, a .cs in a test
+             # project, any other .cs. The AL kinds above stay for plans that name them.
+             "razorpage", "component", "testclass", "class")
+OBJ_ALIASES = {"tableext": "tableextension", "pageext": "pageextension",
+               "reportext": "reportextension", "enumext": "enumextension", "api": "apipage",
+               "apipages": "apipage", "test": "testcodeunit", "testcodeunits": "testcodeunit",
+               "permissions": "permissionset"}
+COMPLEXITY_WEIGHT = {"S": 1, "M": 2, "L": 4}
+
+
+def plugin_version() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        with open(os.path.join(here, "..", "..", ".claude-plugin", "plugin.json"), encoding="utf-8") as fh:
+            return str(json.load(fh).get("version", ""))
+    except (OSError, ValueError):
+        return ""
+
+
+def _git(args: list[str], cwd: str, timeout: int = 20) -> str | None:
+    """stdout of a git command, or None when it fails (bad ref, not a repo, no git)."""
+    try:
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def norm_kind(s: str) -> str:
+    """'Table extension' / 'API page' / 'tables' -> an OBJ_KINDS member, '' if not a kind."""
+    k = re.sub(r"[\s_-]+", "", (s or "").strip().strip("`*").lower())
+    if not k or not k.isalpha():
+        return ""
+    k = OBJ_ALIASES.get(k, k)
+    if k not in OBJ_KINDS and k.endswith("s") and k[:-1] in OBJ_KINDS:
+        k = k[:-1]
+    return k if k in OBJ_KINDS else "other"
+
+
+RE_AL_KEYWORD = re.compile(r"^([A-Za-z]+)\b")
+RE_API_PAGE = re.compile(r"^\s*PageType\s*=\s*API\s*;", re.I | re.M)
+RE_TEST_CU = re.compile(r"^\s*Subtype\s*=\s*Test\s*;", re.I | re.M)
+
+
+def dotnet_file_kind(path: str, text: str, is_test: bool) -> str:
+    """The kind of one changed .NET source file, from its extension and (for .razor) whether it
+    declares a route. Read locally; only the kind leaves."""
+    low = path.lower()
+    if low.endswith(".razor"):
+        return "razorpage" if re.search(r"^\s*@page\s", text, re.M) else "component"
+    if low.endswith(".cs"):
+        return "testclass" if is_test else "class"
+    return "other"
+
+
+def al_object_kind(text: str) -> str:
+    """The object kind of one .al file: the keyword on its first line that is not a comment,
+    a pragma/region, an attribute, a namespace or a using. Read locally; only the kind leaves."""
+    text = text.lstrip("﻿")
+    kw, in_block = "", False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if in_block:
+            if "*/" not in line:
+                continue
+            in_block, line = False, line.split("*/", 1)[1].strip()
+        if line.startswith("/*"):
+            if "*/" not in line:
+                in_block = True
+                continue
+            line = line.split("*/", 1)[1].strip()
+        low = line.lower()
+        if (not line or line.startswith(("//", "#", "[")) or low.startswith(("namespace ", "using "))):
+            continue
+        m = RE_AL_KEYWORD.match(line)
+        kw = m.group(1).lower() if m else ""
+        break
+    if kw == "page" and RE_API_PAGE.search(text):
+        return "apipage"
+    if kw == "codeunit" and RE_TEST_CU.search(text):
+        return "testcodeunit"
+    return kw if kw in OBJ_KINDS else "other"
+
+
+# What counts as the product's code in a diff (bc-dev counts .al).
+CODE_EXT = (".cs", ".razor", ".cshtml")
+
+RE_TEST_DEP = re.compile(r"library assert|test runner|tests?-?test ?libraries|library variable storage",
+                         re.I)
+
+
+def _is_test_project(top: str, rel: str, cache: dict[str, bool]) -> bool:
+    """True when the file sits in a test project: a folder on its path is named like one
+    (`tests/`, `Credit.Tests/`, `Credit.UnitTest/`). .NET test projects are named that way by
+    convention; there is no manifest to read as bc-dev does with app.json."""
+    d = os.path.dirname(rel).replace("\\", "/")
+    if d not in cache:
+        cache[d] = any(re.search(r"tests?$|^tests?\b|\.tests?\.", seg, re.I) for seg in d.split("/") if seg)
+    return cache[d]
+
+
+def _numstat_path(p: str) -> str:
+    """The new-side path of a numstat entry: `a => b` and `dir/{a => b}/f` resolve to b."""
+    if " => " not in p:
+        return p
+    m = re.match(r"^(.*)\{(.*) => (.*)\}(.*)$", p)
+    if m:
+        return re.sub(r"/{2,}", "/", m.group(1) + m.group(3) + m.group(4))
+    return p.split(" => ", 1)[1]
+
+
+def numstat_totals(base: str, cwd: str) -> dict[str, float]:
+    """Added/removed line totals vs `base`, split AL vs everything else, AL added split test vs
+    prod app, and one count per object kind for .al files added (`_new`) or changed (`_ext`).
+    A moved or renamed file is changed, not new (a restructure otherwise reads as all-new
+    objects plus thousands of removed lines). Deleted files only count toward codeRemoved.
+    Totals only — no path is returned."""
+    top = (_git(["rev-parse", "--show-toplevel"], cwd) or "").strip() or cwd
+    out = _git(["diff", "--numstat", "-M", base], top)
+    if out is None:
+        return {}
+    t = {"codeAdded": 0, "codeRemoved": 0, "otherAdded": 0, "otherRemoved": 0, "filesChanged": 0,
+         "codeAddedTest": 0, "codeAddedProd": 0}
+    t.update({f"objDone_{k}_{s}": 0 for k in OBJ_KINDS for s in ("new", "ext")})
+    cache: dict[str, bool] = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        path = _numstat_path(parts[2])
+        kind = "code" if path.lower().endswith(CODE_EXT) else "other"
+        t[f"{kind}Added"] += int(parts[0])
+        t[f"{kind}Removed"] += int(parts[1])
+        t["filesChanged"] += 1
+        if kind == "code":
+            t["codeAddedTest" if _is_test_project(top, path, cache) else "codeAddedProd"] += int(parts[0])
+    for line in (_git(["diff", "--name-status", "-M", base], top) or "").splitlines():
+        parts = line.split("\t")
+        st = parts[0][:1]
+        if len(parts) < 2 or st not in ("A", "M", "R", "C"):
+            continue
+        path = parts[-1]  # R/C lines carry old and new path; the new one is last
+        if not path.lower().endswith(CODE_EXT):
+            continue
+        try:
+            with open(os.path.join(top, path), encoding="utf-8", errors="replace") as fh:
+                k = dotnet_file_kind(path, fh.read(65536), _is_test_project(top, path, cache))
+        except OSError:
+            continue
+        t[f"objDone_{k}_{'new' if st in ('A', 'C') else 'ext'}"] += 1
+    return {k: float(v) for k, v in t.items()}
+
+
+# --- ex-ante scope: the plan file -----------------------------------------------------------
+
+def _md_tables(lines: list[str]) -> list[tuple[list[str], list[list[str]]]]:
+    """Every markdown table as (header cells, body rows); the separator row is dropped."""
+    tables, i = [], 0
+    while i < len(lines):
+        if not lines[i].lstrip().startswith("|"):
+            i += 1
+            continue
+        block = []
+        while i < len(lines) and lines[i].lstrip().startswith("|"):
+            block.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
+            i += 1
+        body = [r for r in block[1:] if not all(re.fullmatch(r":?-{2,}:?", c or "-") for c in r)]
+        tables.append((block[0], body))
+    return tables
+
+
+def _section(text: str, title_re: str) -> str:
+    """The body of the first markdown heading matching title_re, up to the next heading of
+    the same or a higher level."""
+    m = re.search(rf"^(#{{1,4}})\s*(?:\d+\.\s*)?{title_re}[^\n]*\n", text, re.I | re.M)
+    if not m:
+        return ""
+    rest = text[m.end():]
+    n = re.search(rf"^#{{1,{len(m.group(1))}}}\s", rest, re.M)
+    return rest[:n.start()] if n else rest
+
+
+def _open_questions(plan_text: str, plan_path: str) -> int:
+    """Unresolved open questions: the spec beside the plan (rows of its Open Questions table
+    still `Open`) when there is one, else the plan's own list (items with no answer yet)."""
+    d = os.path.dirname(os.path.abspath(plan_path))
+    try:
+        specs = sorted(f for f in os.listdir(d) if f.lower().endswith(".spec.md"))
+    except OSError:
+        specs = []
+    for f in specs:
+        try:
+            with open(os.path.join(d, f), encoding="utf-8", errors="replace") as fh:
+                sec = _section(fh.read(400_000), r"open questions")
+        except OSError:
+            continue
+        n = 0
+        for header, rows in _md_tables(sec.splitlines()):
+            hl = [h.lower() for h in header]
+            if "status" not in hl:
+                continue
+            si = hl.index("status")
+            n += sum(1 for r in rows if len(r) > si and r[si].lower() in ("open", "aperta", "aperto")
+                     and not any(c.startswith("{") for c in r))
+        return n
+    sec = _section(plan_text, r"open questions")
+    n = 0
+    for line in sec.splitlines():
+        m = re.match(r"^\s*\d+\.\s*(.+)$", line)
+        if not m or m.group(1).startswith("{"):
+            continue
+        ans = m.group(1).split("→", 1)[1].strip() if "→" in m.group(1) else ""
+        if not ans or ans.startswith("{"):
+            n += 1
+    return n
+
+
+RE_BASE = re.compile(r"\*\*Base:\*\*\s*`?\s*([0-9a-fA-F]{7,40})\b")
+
+
+def plan_base(req: str, cwd: str) -> str:
+    """The `**Base:**` commit of this requirement's plan, for a BlzRun the caller sent without
+    --numstat-base. Looks where the conductor writes it and where the closing step archives it."""
+    if not req or not RE_TOKEN.match(req) or ".." in req:
+        return ""
+    import glob
+
+    top = (_git(["rev-parse", "--show-toplevel"], cwd) or "").strip() or cwd
+    for root in dict.fromkeys((cwd, top)):
+        for pat in ("requirements/*", "*/requirements/*", ".github/plans"):
+            for path in sorted(glob.glob(os.path.join(root, pat, req, f"{req}.plan.md"))):
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        m = RE_BASE.search(fh.read(400_000))
+                except OSError:
+                    continue
+                if m:
+                    return m.group(1)
+    return ""
+
+
+RE_SPEC_ISSUE = re.compile(r"^\*\*BC Issue:\*\*[ \t]*([1-9][0-9]{0,9}|none)\b", re.M | re.I)
+RE_SPEC_BRANCH = re.compile(r"^\*\*Branch:\*\*[ \t]*`?([A-Za-z0-9._/-]{1,120})`?", re.M)
+RE_SPEC_EST = re.compile(r"^\*\*Agent estimate:\*\*[ \t]*P50[ \t]+(\d{1,5})[ \t]*min\b[^\n]{0,20}?P80[ \t]+(\d{1,5})[ \t]*min"
+                         r"(?:[ \t]*\(([a-z-]{1,20})\))?", re.M | re.I)
+
+
+def _read_spec(path: str) -> dict[str, str]:
+    """The three header facts of one spec: issue ("<digits>" | "none" | ""), branch, estimate."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(8000)  # the header block only; never the body
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    m = RE_SPEC_ISSUE.search(head)
+    if m:
+        out["issue"] = m.group(1).lower()
+    m = RE_SPEC_BRANCH.search(head)
+    if m:
+        out["branch"] = m.group(1)
+    m = RE_SPEC_EST.search(head)
+    if m:
+        out["p50"], out["p80"] = m.group(1), m.group(2)
+        if (m.group(3) or "").lower() in ENUM_VALUES["estSource"]:
+            out["estSource"] = m.group(3).lower()
+    return out
+
+
+def spec_facts(cwd: str, req: str = "", branch: str = "") -> dict[str, str] | None:
+    """Header facts of the requirement's spec: by `req` (the conductor's events) or by the
+    checked-out branch (SessionStart). None when there is no such spec."""
+    import glob
+
+    top = (_git(["rev-parse", "--show-toplevel"], cwd) or "").strip() or cwd
+    roots = list(dict.fromkeys((cwd, top)))
+    if req:
+        if not RE_TOKEN.match(req) or ".." in req:
+            return None
+        for root in roots:
+            for pat in ("requirements/*", "*/requirements/*", ".github/plans"):
+                for path in sorted(glob.glob(os.path.join(root, pat, req, f"{req}.spec.md"))):
+                    return _read_spec(path)
+        return None
+    if not branch:
+        return None
+    for root in roots:
+        for pat in ("requirements/in-progress/*/*.spec.md", "*/requirements/in-progress/*/*.spec.md"):
+            for path in sorted(glob.glob(os.path.join(root, pat))):
+                facts = _read_spec(path)
+                if facts.get("branch") == branch:
+                    return facts
+    return None
+
+
+def link_from_branch(cwd: str, session: str) -> tuple[str, bool]:
+    """(status, newly_linked) for the SessionStart hook; status is the printed token."""
+    import ident
+
+    branch = (_git(["branch", "--show-current"], cwd) or "").strip()
+    facts = spec_facts(cwd, branch=branch) if branch else None
+    if facts is None:
+        return "nospec", False
+    issue = facts.get("issue", "")
+    if not issue:
+        return "missing", False
+    if issue == "none":
+        return "none", False
+    if ident.issue_no(session) == issue:
+        return issue, False
+    return (issue, True) if ident.set_issue(session, issue) else ("nospec", False)
+
+
+RE_INTEGRATION = re.compile(r"\b(integration|integrazione|httpclient|http|web ?services?|soap|odata|"
+                            r"rest api|webhook)\b", re.I)
+
+
+def parse_plan(path: str, cwd: str) -> tuple[dict[str, float], dict[str, str]]:
+    """Fixed, allowlisted counts from a conductor plan: the Planned objects table, the WP table
+    and the header. Never raises; parseOk=0 when the plan or one of its tables is missing."""
+    meas: dict[str, float] = {f"obj_{k}_{s}": 0.0 for k in OBJ_KINDS for s in ("new", "ext")}
+    meas.update({"objTotal": 0.0, "objWeighted": 0.0, "testCodeunitsPlanned": 0.0,
+                 "wpsPlanned": 0.0, "wavesPlanned": 0.0, "openQuestions": 0.0,
+                 "hasIntegration": 0.0, "hasEvents": 0.0, "hasApi": 0.0, "parseOk": 0.0})
+    props: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(400_000)
+    except (OSError, TypeError):
+        return meas, props
+    m = re.search(r"\*\*Tier:\*\*\s*\{?\s*(LOW|MEDIUM|HIGH)\b", text, re.I)
+    if m:
+        props["tier"] = m.group(1).upper()
+    m = RE_BASE.search(text)
+    base = m.group(1) if m else ""
+
+    ok_obj = ok_wp = False
+    domains, wp_tests, waves = "", 0, set()
+    for header, rows in _md_tables(text.splitlines()):
+        hl = [h.lower() for h in header]
+        if any("object type" in h for h in hl) and "count" in hl:
+            ti = next(i for i, h in enumerate(hl) if "object type" in h)
+            ci = hl.index("count")
+            ni = next((i for i, h in enumerate(hl) if "new" in h), -1)
+            xi = next((i for i, h in enumerate(hl) if "complex" in h), -1)
+            for r in rows:
+                if len(r) <= max(ti, ci) or not re.fullmatch(r"\d{1,4}", r[ci]):
+                    continue
+                kind = norm_kind(r[ti])
+                if not kind:
+                    continue
+                ne = "ext" if 0 <= ni < len(r) and r[ni].lower().startswith("ext") else "new"
+                cnt = int(r[ci])
+                cx = r[xi].strip().upper()[:1] if 0 <= xi < len(r) else ""
+                meas[f"obj_{kind}_{ne}"] += cnt
+                meas["objTotal"] += cnt
+                meas["objWeighted"] += cnt * COMPLEXITY_WEIGHT.get(cx, 2)
+            ok_obj = True
+        elif hl and hl[0] == "wp":
+            wi = hl.index("wave") if "wave" in hl else -1
+            di = hl.index("domains") if "domains" in hl else -1
+            tci = next((i for i, h in enumerate(hl) if h.startswith("test codeunit")), -1)
+            for r in rows:
+                if not re.match(r"^WP-?\d+", r[0], re.I):
+                    continue
+                meas["wpsPlanned"] += 1
+                if 0 <= wi < len(r) and r[wi].isdigit():
+                    waves.add(int(r[wi]))
+                if 0 <= di < len(r):
+                    domains += " " + r[di].lower()
+                if 0 <= tci < len(r):
+                    wp_tests += len(re.findall(r"\b\d{4,}\b", r[tci]))
+            ok_wp = True
+    meas["wavesPlanned"] = float(len(waves))
+    planned_tests = meas["obj_testcodeunit_new"] + meas["obj_testcodeunit_ext"]
+    meas["testCodeunitsPlanned"] = planned_tests if planned_tests else float(wp_tests)
+    meas["hasEvents"] = 1.0 if re.search(r"\bevents?\b", domains) else 0.0
+    meas["hasApi"] = 1.0 if re.search(r"\bapi\b", domains) or meas["obj_apipage_new"] + meas["obj_apipage_ext"] else 0.0
+    intro = text.split("\n## ", 1)[0]  # title + the 1–2 sentence summary
+    meas["hasIntegration"] = 1.0 if RE_INTEGRATION.search(domains + " " + intro) else 0.0
+    meas["openQuestions"] = float(_open_questions(text, path))
+    tree = _git(["ls-tree", "-r", "--name-only", base or "HEAD"], cwd)
+    if tree is not None:
+        meas["appObjectCount"] = float(sum(1 for f in tree.splitlines() if f.lower().endswith(CODE_EXT)))
+    meas["parseOk"] = 1.0 if ok_obj and ok_wp else 0.0
+    return meas, props
+
+
+def build(event: str, pairs: list[str], cwd: str, session: str = "") -> tuple[dict, dict] | None:
+    allowed = EVENTS.get(event)
+    if allowed is None:
+        return None
+    props: dict[str, str] = {}
+    meas: dict[str, float] = {}
+    for p in pairs:
+        if "=" not in p:
+            continue
+        k, v = p.split("=", 1)
+        if k not in allowed:
+            continue
+        if RE_NUM.match(v) and k not in NEVER_NUMERIC:
+            meas[k] = float(v)
+        elif k in STRING_KEYS and RE_TOKEN.match(v) and v in ENUM_VALUES.get(k, {v}):
+            props[k] = v
+    v = plugin_version()
+    if v:
+        props["pluginVersion"] = v
+    import ident
+    import usage
+
+    ph = usage.project_hash(cwd)
+    if ph:
+        props["projectHash"] = ph
+    props["project"] = usage.project_name(cwd)
+    explicit_issue = props.get("issueNo")
+    props.update(ident.props(session))
+    if explicit_issue:  # the caller's own issueNo wins over the session's link
+        props["issueNo"] = explicit_issue
+    return props, meas
+
+
+# --- live snapshot -------------------------------------------------------------------------
+
+def live_dir() -> str:
+    # One fixed place, whoever writes: hooks get CLAUDE_PLUGIN_DATA, an agent's Bash call does
+    # not, and the panel must not have to guess which.
+    return os.environ.get("BLZ_LIVE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude", "blz-plugin-data", "live")
+
+
+def _now() -> float:
+    return round(time.time(), 3)
+
+
+def load_live(session: str) -> dict:
+    if not session:
+        return {}
+    try:
+        with open(os.path.join(live_dir(), f"{session}.json"), encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_live(session: str, snap: dict) -> None:
+    d = live_dir()
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, f"{session}.json")
+    tmp = f"{p}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(snap, fh, indent=1, sort_keys=True)
+    os.replace(tmp, p)
+
+
+def run_id(props: dict, req: str) -> str:
+    """Stable for one requirement of one project and user — so a run resumed in a new session
+    keeps its id."""
+    key = f"{props.get('projectHash') or props.get('project', '')}:{req}:{props.get('userHash', '')}"
+    return hashlib.sha256(key.encode()).hexdigest()[:10]
+
+
+def idle_cap() -> float:
+    try:
+        v = float(os.environ.get("BLZ_METRICS_IDLE_CAP_S", "") or IDLE_CAP_S)
+    except ValueError:
+        return IDLE_CAP_S
+    return v if v > 0 else IDLE_CAP_S
+
+
+def open_cap() -> float:
+    try:
+        v = float(os.environ.get("BLZ_METRICS_OPEN_CAP_S", "") or OPEN_CAP_S)
+    except ValueError:
+        return OPEN_CAP_S
+    return v if v > 0 else OPEN_CAP_S
+
+
+def _step_open(snap: dict) -> bool:
+    """A wave or a WP is in flight: the conductor is waiting on work (a compile, the test lane,
+    a subagent's long tool call), not idle, even when no event arrives for a while."""
+    return snap.get("waveStage") == "running" or any(
+        isinstance(w, dict) and w.get("state") == "running" for w in (snap.get("wps") or {}).values())
+
+
+def _resumes_after_gate(event: str, props: dict, snap: dict, now: float) -> bool:
+    """Does this event end the human wait a BlzGate opened? Any conductor event does. A
+    heartbeat does only when it is the conductor family working again: not the main thread
+    (no agent: it is relaying the question, AskUserQuestion, SendMessage), not the ask itself,
+    and not the heartbeat racing the gate's own Bash call (within GATE_GRACE_S). Without this the
+    first heartbeat closed the wait within seconds and the human's answer time was counted as
+    active work (issue: humanWaitSeconds ~0 on runs with stops)."""
+    if event != "BlzAlive":
+        return True
+    agent = (props.get("agent") or "").lower()
+    if not agent or (props.get("tool") or "") == "AskUserQuestion":
+        return False
+    return now - float(snap.get("gateAt") or now) >= GATE_GRACE_S
+
+
+def _tick(snap: dict, event: str, now: float, props: dict | None = None) -> None:
+    """Advance the run's clocks: the gap since the previous run event is active time, unless an
+    BlzGate opened it — then it is human wait. Between steps the gap is capped at
+    IDLE_CAP_S, so an idle session does not count; inside an open wave or WP it counts in full
+    up to OPEN_CAP_S (a sanity bound for a session abandoned mid-wave)."""
+    last = snap.get("lastEventAt")
+    if last is not None:
+        gap = max(0.0, now - float(last))
+        if snap.get("gateAt") is not None:
+            snap["humanWaitS"] = round(float(snap.get("humanWaitS") or 0) + gap, 1)
+            if _resumes_after_gate(event, props or {}, snap, now):
+                snap.pop("gateAt", None)
+        else:
+            cap = open_cap() if _step_open(snap) else idle_cap()
+            snap["activeS"] = round(float(snap.get("activeS") or 0) + min(gap, cap), 1)
+    snap["lastEventAt"] = now
+    if event == "BlzGate":
+        snap["gateAt"] = now
+
+
+def apply_live(event: str, props: dict, meas: dict, snap: dict, cwd: str, session: str,
+               now: float | None = None) -> dict:
+    """Fold one event into the session snapshot and enrich the event from it (req/runId,
+    durations, measured wallMinutes, activeSeconds). Mutates props/meas; returns the new
+    snapshot."""
+    now = _now() if now is None else now
+    fresh = False
+    if event == "BlzRunStart":
+        req = props.get("req") or snap.get("req") or "run"
+        rid = props.get("runId") or run_id(props, req)
+        resumed = snap.get("runId") == rid and not snap.get("outcome")
+        if not resumed:
+            snap, fresh = {"wps": {}, "waveLog": []}, True
+        snap.update({"req": req, "runId": rid,
+                     "startedAt": now if snap.get("startedAt") is None else snap["startedAt"],
+                     "tier": props.get("tier") or snap.get("tier"),
+                     "wavesPlanned": int(meas.get("waves") or snap.get("wavesPlanned") or 0),
+                     "wpsPlanned": int(meas.get("wpsPlanned") or snap.get("wpsPlanned") or 0)})
+        snap.pop("outcome", None)
+        snap.pop("endedAt", None)
+    elif event in ("BlzRun", "BlzEstimate") and props.get("req") and props["req"] != snap.get("req"):
+        # A session that never saw this run's BlzRunStart: still key the event to its run.
+        # No startedAt, so no wallMinutes — but the run's attempts and dedupe still apply.
+        snap = {"wps": {}, "waveLog": [], "req": props["req"],
+                "runId": props.get("runId") or run_id(props, props["req"])}
+    if snap.get("runId"):
+        props.setdefault("req", snap.get("req", ""))
+        props.setdefault("runId", snap["runId"])
+
+    if fresh:
+        snap.update({"activeS": 0.0, "humanWaitS": 0.0, "lastEventAt": now})
+    elif snap.get("runId") and not snap.get("outcome") and event in TICK_EVENTS:
+        _tick(snap, event, now, props)
+    if event == "BlzAlive":
+        # The heartbeat carries the run's position to the team view and keeps its clock
+        # running; it changes nothing else (its cwd may be a worktree, not the project).
+        for k in ("wave", "wavesPlanned"):
+            if snap.get(k):
+                meas[k] = float(snap[k])
+        snap["updatedAt"] = now
+        return snap
+
+    wave = int(meas["wave"]) if "wave" in meas else snap.get("wave")
+    stage = props.get("stage", "")
+    if event == "BlzWave" and wave:
+        if meas.get("waves"):
+            snap["wavesPlanned"] = int(meas["waves"])
+        if stage == "start":
+            snap.update({"wave": wave, "waveStage": "running", "waveStartedAt": now})
+        elif stage == "end":
+            if "durationS" not in meas and snap.get("wave") == wave and snap.get("waveStartedAt"):
+                meas["durationS"] = round(now - float(snap["waveStartedAt"]), 1)
+            entry = {"wave": wave, "endedAt": now, "durationS": meas.get("durationS"),
+                     "verdict": props.get("verdict"), "lane": props.get("lane"),
+                     "passed": meas.get("passed"), "failed": meas.get("failed")}
+            snap["waveLog"] = [w for w in snap.get("waveLog", []) if w.get("wave") != wave] + [entry]
+            snap.update({"wave": wave, "waveStage": "done"})
+    elif event == "BlzWp" and "wp" in meas:
+        key = str(int(meas["wp"]))
+        wp = dict(snap.get("wps", {}).get(key) or {})
+        if stage == "start":
+            wp.update({"wave": wave, "state": "running", "startedAt": now, "endedAt": None,
+                       "fixRound": int(meas.get("fixRound") or 0)})
+        elif stage == "end":
+            if "durationS" not in meas and wp.get("startedAt"):
+                meas["durationS"] = round(now - float(wp["startedAt"]), 1)
+            wp.update({"wave": wave or wp.get("wave"), "state": props.get("result") or "done",
+                       "endedAt": now, "durationS": meas.get("durationS")})
+        snap.setdefault("wps", {})[key] = wp
+    elif event == "BlzLane":
+        snap["lane"] = {"result": props.get("result"), "at": now,
+                        "passed": meas.get("passed"), "failed": meas.get("failed")}
+    elif event == "BlzRun":
+        # Durations are measured, never reported: a value the conductor passes is a guess
+        # (round numbers that disagreed with the measured span by 2x), kept for comparison.
+        reported = meas.pop("wallMinutes", None)
+        if reported:
+            meas["reportedMinutes"] = reported
+        if snap.get("startedAt") is not None:
+            meas["wallMinutes"] = round((now - float(snap["startedAt"])) / 60, 1)
+        meas["activeSeconds"] = float(round(float(snap.get("activeS") or 0)))
+        meas["humanWaitSeconds"] = float(round(float(snap.get("humanWaitS") or 0)))
+        # Σ wave durations of this attempt: activeSeconds below it means the clock missed work.
+        meas["waveSeconds"] = float(round(sum(float(w.get("durationS") or 0)
+                                              for w in snap.get("waveLog") or [])))
+        snap.update({"outcome": props.get("outcome") or "done", "endedAt": now})
+
+    snap.update({"schema": 1, "session": session, "cwd": cwd, "project": props.get("project"),
+                 "projectHash": props.get("projectHash"), "user": props.get("user"),
+                 "where": props.get("where"), "updatedAt": now})
+    return snap
+
+
+# --- attempt registry ------------------------------------------------------------------------
+# runs.json: runId -> {attempts, firstStartedAt, activeSecondsTotal, lastOutcome, estimatedAt,
+# att: {"<n>": {activeS, waitS, outcome}}}. Beside the live directory, not under
+# CLAUDE_PLUGIN_DATA: the conductor's Bash calls do not get that variable, the hooks do, and
+# both must read the same file.
+
+REGISTRY_KEEP_S = 180 * 86400
+
+
+def runs_path() -> str:
+    return os.environ.get("BLZ_RUNS_FILE") or os.path.join(os.path.dirname(live_dir()), "runs.json")
+
+
+def load_runs() -> dict:
+    try:
+        with open(runs_path(), encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_runs(reg: dict, now: float | None = None) -> None:
+    now = _now() if now is None else now
+    keep = {k: v for k, v in reg.items()
+            if isinstance(v, dict) and now - float(v.get("updatedAt") or now) < REGISTRY_KEEP_S}
+    p = runs_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = f"{p}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(keep, fh, indent=1, sort_keys=True)
+    os.replace(tmp, p)
+
+
+def resolve_rework(event: str, props: dict, snap: dict, reg: dict, now: float | None = None) -> None:
+    """A req whose run already finished `done` and is started again (a follow-up fix weeks
+    later) is a REWORK, not another attempt: it gets its own runId (hash of `<req>#r<n>`) and
+    `rework=<n>`, so its time never inflates the original task against the original estimate.
+    A rework that is still open is resumed like any run. Sets props["runId"]; no-op otherwise."""
+    now = _now() if now is None else now
+    req = props.get("req")
+    if event not in ("BlzRunStart", "BlzRun", "BlzEstimate") or not req or props.get("runId"):
+        return
+    if snap.get("req") == req and snap.get("runId") and (event != "BlzRunStart" or not snap.get("outcome")):
+        return  # this session's own run (or a report for it): the snapshot already keys it
+    base = run_id(props, req)
+    e = reg.get(base) or {}
+    if e.get("lastOutcome") != "done":
+        return  # open or stopped: a resume, i.e. the next attempt of the same run
+    cur = e.get("reworkRunId")
+    if cur and (reg.get(cur) or {}).get("lastOutcome") != "done":
+        props["runId"] = cur
+    elif event == "BlzRunStart":
+        n = int(e.get("reworks") or 0) + 1
+        cur = run_id(props, f"{req}#r{n}")
+        e.update({"reworks": n, "reworkRunId": cur, "updatedAt": now})
+        reg[cur] = {"attempts": 0, "att": {}, "rework": n, "reworkOf": base, "updatedAt": now}
+        props["runId"] = cur
+    # else: a late BlzRun/BlzEstimate for the finished run itself — the dedupe decides
+
+
+def apply_attempts(event: str, props: dict, meas: dict, snap: dict, reg: dict,
+                   now: float | None = None) -> bool:
+    """Fold one run event into the attempt registry: number the attempt, carry `attempt` on the
+    event, keep this attempt's active time so a later session can sum it. Returns False when
+    the event is a duplicate to drop: a BlzRun for an attempt that already has an outcome, or
+    a second BlzEstimate for the run."""
+    now = _now() if now is None else now
+    rid = snap.get("runId")
+    if not rid or props.get("runId") != rid:
+        return True
+    e = reg.setdefault(rid, {"attempts": 0, "att": {}})
+    e.setdefault("att", {})
+    e.setdefault("firstStartedAt", now if snap.get("startedAt") is None else snap["startedAt"])
+    if "attempt" not in snap:
+        latest = e["att"].get(str(e.get("attempts", 0))) or {}
+        # A new session's BlzRunStart is a new attempt (the plan's resume path). A session
+        # that reports without one continues the latest attempt, unless that one is closed.
+        if event == "BlzRunStart" or not e.get("attempts") or latest.get("outcome"):
+            e["attempts"] = int(e.get("attempts") or 0) + 1
+        snap["attempt"] = int(e["attempts"])
+    a = str(snap["attempt"])
+    meas["attempt"] = float(snap["attempt"])
+    if e.get("rework"):
+        meas["rework"] = float(e["rework"])
+    cur = e["att"].setdefault(a, {})
+    cur["activeS"] = float(snap.get("activeS") or 0)
+    cur["waitS"] = float(snap.get("humanWaitS") or 0)
+    e["activeSecondsTotal"] = float(round(sum(float(x.get("activeS") or 0) for x in e["att"].values())))
+    e["updatedAt"] = now
+    if event == "BlzEstimate":
+        if e.get("estimatedAt"):
+            return False
+        e["estimatedAt"] = now
+    elif event == "BlzRun":
+        if cur.get("outcome"):
+            return False
+        cur["outcome"] = e["lastOutcome"] = props.get("outcome") or "done"
+        meas["attempts"] = float(e["attempts"])
+        meas["activeSecondsTotal"] = e["activeSecondsTotal"]
+        meas["wallMinutesTotal"] = round((now - float(e["firstStartedAt"])) / 60, 1)
+    return True
+
+
+class _Lock:
+    """Best-effort cross-process lock around the snapshot + registry read-modify-write: the
+    alive hook now writes the snapshot too, in the background, alongside the conductor. Waits at
+    most ~2 s, breaks a lock older than 15 s, and on any failure proceeds unlocked — a lost
+    increment is acceptable, a blocked session is not."""
+
+    def __init__(self, path: str):
+        self.path, self.held = path, False
+
+    def __enter__(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        except OSError:
+            return self
+        for _ in range(40):
+            try:
+                os.close(os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                self.held = True
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.path) > 15:
+                        os.remove(self.path)
+                        continue
+                except OSError:
+                    pass
+                time.sleep(0.05)
+            except OSError:
+                return self
+        return self
+
+    def __exit__(self, *_):
+        if self.held:
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+        return False
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] == "--self-test":
+        return self_test() if argv else 0
+    event, rest = argv[0], argv[1:]
+    base = ""
+    if "--numstat-base" in rest:
+        i = rest.index("--numstat-base")
+        base = rest[i + 1] if i + 1 < len(rest) else ""
+        rest = rest[:i] + rest[i + 2:]
+    session = ""
+    if "--session" in rest:
+        i = rest.index("--session")
+        session = rest[i + 1] if i + 1 < len(rest) else ""
+        rest = rest[:i] + rest[i + 2:]
+    if event == "BlzIssue" and "--from-branch" in rest:
+        # SessionStart: link from the spec of the checked-out branch and say what happened.
+        rest = [a for a in rest if a != "--from-branch"]
+        try:
+            status, new = link_from_branch(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd(), session)
+        except Exception:
+            status, new = "nospec", False
+        print(f"issue={status}")
+        if not new:
+            return 0  # nothing new to record (already linked, none, or no spec)
+        rest = [f"issueNo={status}", "source=spec"]
+    plan = ""
+    if "--plan" in rest:
+        i = rest.index("--plan")
+        plan = rest[i + 1] if i + 1 < len(rest) else ""
+        rest = rest[:i] + rest[i + 2:]
+    cwd = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    data = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.join(
+        os.path.expanduser("~"), ".claude", "blz-plugin-data")
+    out = os.path.join(data, "metrics", "blz-metrics.jsonl")
+    try:
+        built = build(event, rest, cwd, session)
+        if not built:
+            return 0
+        props, meas = built
+        if event == "BlzIssue":
+            import ident as _ident
+
+            no = props.get("issueNo", "")
+            if no != "0" and not _ident.RE_ISSUE.match(no):
+                return 0  # not an Issue entryNo: nothing linked, nothing sent
+            if not _ident.set_issue(session, no):
+                return 0
+            if no == "0":
+                props.pop("issueNo", None)
+                props["linked"] = "false"
+        if event in ("BlzRunStart", "BlzEstimate") and props.get("req"):
+            # The spec header knows the Issue and the estimate; the conductor need not pass them.
+            import ident as _ident
+
+            facts = spec_facts(cwd, req=props["req"]) or {}
+            no = facts.get("issue", "")
+            if _ident.RE_ISSUE.match(no) and "issueNo" not in props:
+                props["issueNo"] = no
+                if _ident.issue_no(session) != no:
+                    _ident.set_issue(session, no)
+            if event == "BlzEstimate" and "estP50Min" not in meas and facts.get("p50"):
+                meas["estP50Min"], meas["estP80Min"] = float(facts["p50"]), float(facts["p80"])
+                props.setdefault("estSource", facts.get("estSource", "manual"))
+        if event == "BlzRun" and not base:
+            # The model drops the flag now and then; the plan always carries the commit.
+            base = plan_base(props.get("req", ""), cwd)
+        if base and RE_TOKEN.match(base):
+            meas.update(numstat_totals(base, cwd))
+        if event == "BlzEstimate":
+            pm, pp = parse_plan(plan, cwd)
+            meas.update(pm)
+            for k, v in pp.items():
+                props.setdefault(k, v)
+            props.setdefault("estSource", "none")
+        import ident
+
+        full_session = ident.session_id(session)
+        keep = True
+        if full_session and event in TICK_EVENTS:
+            with _Lock(os.path.join(live_dir(), ".lock")):
+                snap = load_live(full_session)
+                live = bool(snap.get("runId")) and not snap.get("outcome")
+                if event == "BlzGate" and not live:
+                    return 0  # a gate outside a live run (e.g. SubagentStop after BlzRun) is noise
+                # Alive and a gate only matter inside a live run; a lane run outside a
+                # conductor run (blazor-developer) has no run to join.
+                if (event not in ("BlzAlive", "BlzGate") or live) and (event != "BlzLane" or snap.get("runId")):
+                    reg = load_runs()
+                    resolve_rework(event, props, snap, reg)
+                    snap = apply_live(event, props, meas, snap, cwd, full_session)
+                    keep = apply_attempts(event, props, meas, snap, reg)
+                    if keep:
+                        save_runs(reg)
+                        save_live(full_session, snap)
+        if not keep:
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(os.path.join(os.path.dirname(out), "capture.log"), "a", encoding="utf-8") as fh:
+                fh.write(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ} emit: dropped duplicate "
+                         f"{event} runId={props.get('runId')} attempt={int(meas.get('attempt', 0))}\n")
+            return 0
+        props["schema"] = str(SCHEMA)
+        rec = {"schema": SCHEMA, "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "event": event, "props": props, "measurements": meas}
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        if event != "BlzAlive":  # heartbeats are for the live view, not the history file
+            with open(out, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, sort_keys=True) + "\n")
+        if event == "BlzRun":
+            # session_end.py joins this onto the session total: tokens per changed AL line.
+            with open(os.path.join(os.path.dirname(out), "last-run.json"), "w", encoding="utf-8") as fh:
+                json.dump({"ts": rec["ts"], "measurements": meas, "props": props}, fh)
+        import appinsights
+
+        appinsights.send_event(event, props, meas, ts=rec["ts"],
+                               operation_id=props.get("runId") or props.get("session", ""))
+    except Exception:  # telemetry must never disturb the caller
+        pass
+    return 0
+
+
+def self_test() -> int:
+    cwd = os.getcwd()
+    b = build("BlzRun", ["tier=MEDIUM", "wps=3", "lane=ran", "outcome=C:/Customer/secret.al",
+                          "evil=1", "stops=2.5"], cwd)
+    lane = build("BlzLane", ["result=ran", "publishS=31.5", "envType=Sandbox"], cwd)
+    checks = [
+        ("known event built", b is not None),
+        ("string enum kept", b and b[0].get("tier") == "MEDIUM" and b[0].get("lane") == "ran"),
+        ("numbers are measurements", b and b[1] == {"wps": 3.0, "stops": 2.5}),
+        ("path-shaped value rejected", b and "outcome" not in b[0]),
+        ("unknown key rejected", b and "evil" not in b[1]),
+        ("unknown event rejected", build("Evil", ["x=1"], cwd) is None),
+        ("lane event", lane and lane[1]["publishS"] == 31.5 and lane[0]["envType"] == "Sandbox"),
+        ("numstat of a bad ref is empty, not an error", numstat_totals("no-such-ref-xyz", cwd) in ({}, {
+            "codeAdded": 0.0, "codeRemoved": 0.0, "otherAdded": 0.0, "otherRemoved": 0.0, "filesChanged": 0.0})),
+        ("project is a name, not a path", b and "/" not in b[0]["project"] and "\\" not in b[0]["project"]),
+        ("identity dimension present", b and b[0].get("where") in ("local", "cloud")),
+    ]
+    fd = build("BlzHook", ["hook=freshdesk-guard", "decision=ask", "tool=createTicketNote",
+                            "calls=2", "ticket=48213", "body=Dear customer", "tool_input={}"], cwd)
+    fd_bad = build("BlzHook", ["hook=freshdesk-guard", "decision=deny",
+                                "tool=Ticket 48213: the invoice is wrong"], cwd)
+    checks += [
+        ("freshdesk hook: tool token + call count kept",
+         fd and fd[0].get("tool") == "createTicketNote" and fd[0].get("decision") == "ask"
+         and fd[1].get("calls") == 2.0),
+        ("freshdesk hook: ticket id / text / tool_input never kept",
+         fd and not ({"ticket", "body", "tool_input"} & (set(fd[0]) | set(fd[1])))
+         and "48213" not in json.dumps(fd)),
+        ("freshdesk hook: free-text tool value rejected", fd_bad and "tool" not in fd_bad[0]),
+    ]
+
+    # Live snapshot: a two-wave run, timed with a fake clock.
+    s = "sess-0001-self-test"
+    snap: dict = {}
+
+    def ev(event: str, pairs: list[str], t: float) -> tuple[dict, dict]:
+        nonlocal snap
+        p, m = build(event, pairs, cwd, s)
+        snap = apply_live(event, p, m, snap, cwd, s, now=t)
+        return p, m
+
+    ev("BlzRunStart", ["req=U-04", "tier=MEDIUM", "wpsPlanned=2", "waves=2"], 1000)
+    w1, _ = ev("BlzWave", ["stage=start", "wave=1", "waves=2", "wps=1"], 1010)
+    ev("BlzWp", ["stage=start", "wave=1", "wp=1"], 1011)
+    _, wpm = ev("BlzWp", ["stage=end", "wave=1", "wp=1", "result=done"], 1311)
+    _, wm = ev("BlzWave", ["stage=end", "wave=1", "verdict=APPROVED", "lane=ran", "passed=14"], 1610)
+    ev("BlzWave", ["stage=start", "wave=2"], 1620)
+    ev("BlzLane", ["result=ran", "passed=20", "failed=0"], 1700)
+    _, rm = ev("BlzRun", ["tier=MEDIUM", "wallMinutes=0", "outcome=done"], 2200)
+    rid = snap.get("runId", "")
+    checks += [
+        ("runId derived and stable", len(rid) == 10 and rid == run_id(w1, "U-04")),
+        ("req/runId copied onto later events", w1.get("req") == "U-04" and w1.get("runId") == rid),
+        ("req stays a string", build("BlzRunStart", ["req=042"], cwd)[0].get("req") == "042"),
+        ("wp duration from snapshot", wpm.get("durationS") == 300.0),
+        ("wave duration from snapshot", wm.get("durationS") == 600.0),
+        ("wave log kept", [w["wave"] for w in snap["waveLog"]] == [1]),
+        ("current wave tracked", snap.get("wave") == 2 and snap.get("waveStage") == "running"),
+        ("lane result tracked", snap.get("lane", {}).get("passed") == 20.0),
+        ("wallMinutes 0 is replaced", rm.get("wallMinutes") == 20.0),
+        ("run closed", snap.get("outcome") == "done"),
+        ("new run after a finished one starts clean",
+         apply_live("BlzRunStart", *build("BlzRunStart", ["req=U-05"], cwd, s), dict(snap), cwd, s,
+                    now=3000).get("waveLog") == []),
+        ("activeSeconds sums the run's event gaps", rm.get("activeSeconds") == 1200.0),
+    ]
+    checks += _self_test_duration(cwd) + _self_test_gate_wait(cwd) + _self_test_attempts(cwd) + _self_test_estimate(cwd)
+    checks += _self_test_numstat() + _self_test_privacy(cwd) + _self_test_issue(cwd)
+    ok = True
+    for name, passed in checks:
+        print(f"  {'PASS' if passed else 'FAIL'}  {name}")
+        ok = ok and bool(passed)
+    return 0 if ok else 1
+
+
+def _run(events: list[tuple[str, list[str], float]], cwd: str, session: str, snap: dict,
+         reg: dict) -> tuple[dict, list[tuple[dict, dict, bool]]]:
+    """Feed events through build -> apply_live -> apply_attempts, as main() does."""
+    out = []
+    for event, pairs, t in events:
+        p, m = build(event, pairs, cwd, session)
+        resolve_rework(event, p, snap, reg, now=t)
+        snap = apply_live(event, p, m, snap, cwd, session, now=t)
+        out.append((p, m, apply_attempts(event, p, m, snap, reg, now=t)))
+    return snap, out
+
+
+def _self_test_duration(cwd: str) -> list[tuple[str, bool]]:
+    s = "sess-0002-self-test"
+    snap, ev = _run([("BlzRunStart", ["req=D-01"], 0), ("BlzWave", ["stage=start", "wave=1"], 100),
+                     ("BlzAlive", ["agent=blazor-implement-subagent"], 220),
+                     # a 30-min compile / lane run inside the open wave: all of it is work
+                     ("BlzWp", ["stage=end", "wave=1", "wp=1"], 2020),
+                     ("BlzWave", ["stage=end", "wave=1"], 2100),
+                     # an evening away between waves: 4900 s of nothing, IDLE_CAP_S at most
+                     ("BlzWave", ["stage=start", "wave=2"], 7000),
+                     ("BlzGate", ["gate=fixloop"], 7060),
+                     # the human answers 3000 s later: wait, not work
+                     ("BlzWp", ["stage=start", "wave=2", "wp=2", "fixRound=1"], 10060),
+                     ("BlzWp", ["stage=end", "wave=2", "wp=2"], 10300),
+                     ("BlzWave", ["stage=end", "wave=2"], 10340),
+                     ("BlzRun", ["wallMinutes=240", "outcome=done"], 10400)], cwd, s, {}, {})
+    rm = ev[-1][1]
+    # A session abandoned mid-wave: the open-step gap is still bounded by OPEN_CAP_S.
+    _, ab = _run([("BlzRunStart", ["req=D-03"], 0), ("BlzWave", ["stage=start", "wave=1"], 10),
+                  ("BlzRun", ["outcome=stopped"], 10 + 86400)], cwd, s, {}, {})
+    return [
+        ("duration measured although the conductor sent one", rm.get("wallMinutes") == round(10400 / 60, 1)),
+        ("the conductor's value is kept as reportedMinutes", rm.get("reportedMinutes") == 240.0),
+        ("a gap inside an open wave counts in full", ev[3][1].get("attempt") == 1.0 and rm.get("activeSeconds")
+         == 100 + 120 + 1800 + 80 + 600 + 60 + 240 + 40 + 60),
+        ("the gap after a gate is human wait", rm.get("humanWaitSeconds") == 3000.0),
+        ("waveSeconds sums the wave durations", rm.get("waveSeconds") == 2000 + 3340),
+        ("an abandoned open wave is capped at OPEN_CAP_S", ab[-1][1].get("activeSeconds") == 10 + OPEN_CAP_S),
+        ("alive advances the clock", ev[2][2] and ev[2][1].get("attempt") == 1.0),
+        ("no wallMinutes without a start", "wallMinutes" not in _run(
+            [("BlzRun", ["req=D-02", "wallMinutes=60"], 10)], cwd, s, {}, {})[1][0][1]),
+    ]
+
+
+def _self_test_gate_wait(cwd: str) -> list[tuple[str, bool]]:
+    s = "sess-0006-gate-wait"
+    _, ev = _run([("BlzRunStart", ["req=G-01"], 0), ("BlzWave", ["stage=start", "wave=1"], 100),
+                  ("BlzGate", ["gate=fixloop"], 1000),
+                  # the gate's own Bash call races a conductor heartbeat: still the ask
+                  ("BlzAlive", ["agent=blazor-dev:blazor-conductor", "tool=Bash"], 1005),
+                  # the main thread relays the question and the human thinks for 40 min
+                  ("BlzAlive", ["tool=AskUserQuestion"], 1100),
+                  ("BlzAlive", ["tool=SendMessage"], 3400),
+                  # the conductor works again: the wait ends here
+                  ("BlzAlive", ["agent=blazor-dev:blazor-conductor", "tool=Bash"], 3500),
+                  ("BlzWave", ["stage=end", "wave=1"], 3800),
+                  ("BlzRun", ["outcome=done"], 3900)], cwd, s, {}, {})
+    rm = ev[-1][1]
+    _, au = _run([("BlzRunStart", ["req=G-02"], 0), ("BlzWave", ["stage=start", "wave=1"], 100),
+                  ("BlzGate", ["gate=autostop"], 400),
+                  ("BlzWp", ["stage=start", "wave=1", "wp=2"], 2200),
+                  ("BlzRun", ["outcome=done"], 2300)], cwd, s, {}, {})
+    return [
+        ("heartbeats from the main thread do not end a gate's wait", rm.get("humanWaitSeconds") == 2500.0),
+        ("the wait is not counted as active", rm.get("activeSeconds") == 100 + 900 + 300 + 100),
+        ("autostop is an accepted gate and its gap is wait", au[-1][1].get("humanWaitSeconds") == 1800.0),
+    ]
+
+
+def _self_test_attempts(cwd: str) -> list[tuple[str, bool]]:
+    reg: dict = {}
+    a, b = "sess-0003-attempt-a", "sess-0004-attempt-b"
+    # Session A: starts the run, works 900 s, dies without a BlzRun.
+    sa, eva = _run([("BlzRunStart", ["req=R-01", "tier=LOW"], 0), ("BlzWave", ["stage=start", "wave=1"], 300),
+                    ("BlzWp", ["stage=end", "wave=1", "wp=1"], 900)], cwd, a, {}, reg)
+    # Session B, next day: the same req resumes; works 400 s and finishes.
+    sb, evb = _run([("BlzRunStart", ["req=R-01", "tier=LOW"], 90000), ("BlzWave", ["stage=start", "wave=2"], 90200),
+                    ("BlzRun", ["outcome=done"], 90400)], cwd, b, {}, reg)
+    rid = sa.get("runId")
+    run_p, run_m, kept = evb[-1]
+    # The same BlzRun again (the 28 Sep duplicate): dropped.
+    _, dup = _run([("BlzRun", ["outcome=done"], 90500)], cwd, b, dict(sb), reg)
+    # A resume inside the same session is the same attempt.
+    _, same = _run([("BlzRunStart", ["req=R-02"], 0), ("BlzRunStart", ["req=R-02"], 50)], cwd, a, {}, reg)
+    return [
+        ("same runId across sessions", rid and sb.get("runId") == rid),
+        ("attempt 1 then 2", eva[0][1].get("attempt") == 1.0 and evb[0][1].get("attempt") == 2.0),
+        ("attempt on every run event", all(m.get("attempt") == 2.0 for _, m, _ in evb)),
+        ("BlzRun carries attempts and the summed active time",
+         kept and run_m.get("attempts") == 2.0 and run_m.get("activeSecondsTotal") == 1300.0
+         and run_m.get("activeSeconds") == 400.0),
+        ("wallMinutesTotal spans the attempts", run_m.get("wallMinutesTotal") == round(90400 / 60, 1)),
+        ("registry records the outcome", reg[rid]["lastOutcome"] == "done" and reg[rid]["attempts"] == 2),
+        ("duplicate BlzRun dropped", dup[0][2] is False),
+        ("resume in the same session keeps the attempt", [m.get("attempt") for _, m, _ in same] == [1.0, 1.0]),
+    ] + _self_test_rework(cwd, reg, rid)
+
+
+def _self_test_rework(cwd: str, reg: dict, base: str) -> list[tuple[str, bool]]:
+    """R-01 finished `done` above. Weeks later the same req is started again: a rework."""
+    c, d, f = "sess-0006-rework-c", "sess-0007-rework-d", "sess-0008-rework-f"
+    sc, evc = _run([("BlzRunStart", ["req=R-01"], 2_000_000), ("BlzEstimate", [], 2_000_010),
+                    ("BlzWave", ["stage=start", "wave=1"], 2_000_100)], cwd, c, {}, reg)
+    rw = sc.get("runId")
+    # resumed in another session, then finished
+    sd, evd = _run([("BlzRunStart", ["req=R-01"], 2_100_000),
+                    ("BlzRun", ["req=R-01", "outcome=done"], 2_100_300)], cwd, d, {}, reg)
+    # and started once more after that: a second rework
+    sf, _ = _run([("BlzRunStart", ["req=R-01"], 3_000_000)], cwd, f, {}, reg)
+    run_m = evd[-1][1]
+    return [
+        ("a finished req started again gets its own runId", rw and rw != base and evc[0][0].get("runId") == rw),
+        ("rework flagged on its events", all(m.get("rework") == 1.0 for _, m, _ in evc)),
+        ("rework has its own estimate", evc[1][2] is True),
+        ("rework starts at attempt 1", evc[0][1].get("attempt") == 1.0),
+        ("an open rework resumes as its next attempt", sd.get("runId") == rw and run_m.get("attempt") == 2.0),
+        ("rework time never touches the original task",
+         reg[base]["activeSecondsTotal"] == 1300.0 and run_m.get("activeSecondsTotal") == 100.0 + 300.0),
+        ("a rework after a finished rework is the next one",
+         sf.get("runId") not in (base, rw) and reg[sf["runId"]].get("rework") == 2),
+        ("the original run keeps no rework flag", "rework" not in reg[base]),
+    ]
+
+
+def _self_test_estimate(cwd: str) -> list[tuple[str, bool]]:
+    import shutil
+    import tempfile
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    plan = os.path.join(here, "fixtures", "sample.plan.md")
+    m, p = parse_plan(plan, cwd)
+    d = tempfile.mkdtemp()
+    try:
+        shutil.copy(plan, d)  # no spec beside it: the plan's own open questions count
+        m2, _ = parse_plan(os.path.join(d, "sample.plan.md"), cwd)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    bad, _ = parse_plan(os.path.join(here, "fixtures", "no-such.plan.md"), cwd)
+    reg: dict = {}
+    s = "sess-0005-estimate"
+    _, ev = _run([("BlzRunStart", ["req=E-01"], 0),
+                  ("BlzEstimate", ["estP50Min=90", "estP80Min=150", "estSource=stima-sviluppo",
+                                    "issueNo=1234", "model=claude-sonnet-5-5"], 10),
+                  ("BlzEstimate", [], 20)], cwd, s, {}, reg)
+    ep, em, ekept = ev[1]
+    return [
+        ("plan parsed", m["parseOk"] == 1.0 and p.get("tier") == "MEDIUM"),
+        ("objects by kind", m["obj_table_new"] == 1 and m["obj_tableextension_new"] == 1
+         and m["obj_codeunit_new"] == 1 and m["obj_codeunit_ext"] == 1 and m["obj_apipage_new"] == 1
+         and m["obj_other_new"] == 1),
+        ("objTotal / objWeighted", m["objTotal"] == 10 and m["objWeighted"] == 2 + 1 + 1 + 4 + 2 + 2 + 6 + 1),
+        ("WPs, waves and planned tests", m["wpsPlanned"] == 3 and m["wavesPlanned"] == 2
+         and m["testCodeunitsPlanned"] == 3),
+        ("open questions from the spec", m["openQuestions"] == 2),
+        ("open questions from the plan without a spec", m2["openQuestions"] == 1),
+        ("flags", m["hasEvents"] == 1 and m["hasApi"] == 1 and m["hasIntegration"] == 1),
+        ("unreadable plan -> parseOk 0, not an error", bad["parseOk"] == 0.0 and bad["objTotal"] == 0),
+        ("estimate passes through the external estimate", em.get("estP80Min") == 150.0
+         and ep.get("estSource") == "stima-sviluppo" and ep.get("issueNo") == "1234"),
+        ("estimate keyed to the run", ekept and ep.get("runId") and em.get("attempt") == 1.0),
+        ("second estimate for the run dropped", ev[2][2] is False),
+    ]
+
+
+def _self_test_numstat() -> list[tuple[str, bool]]:
+    import shutil
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    g = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+
+    def w(rel: str, text: str) -> None:
+        p = os.path.join(d, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    try:
+        if _git(["init", "-q"], d) is None:
+            return [("object-kind classification (git unavailable, skipped)", True)]
+        w("src/Credit.Server/Old.cs", "class Old\n{\n}\n")
+        w("src/Credit.Server/Gone.cs", "class Gone\n{\n}\n")
+        moved = "enum Moved\n{\n    A,\n    B,\n    C,\n"
+        w("src/Credit.Shared/Moved.cs", moved + "}\n")
+        _git([*g, "add", "-A"], d)
+        _git([*g, "commit", "-q", "-m", "base"], d)
+        base = (_git(["rev-parse", "HEAD"], d) or "").strip()
+        w("src/Credit.Server/Old.cs", "class Old\n{\n    // member added\n}\n")
+        os.remove(os.path.join(d, "src/Credit.Server/Gone.cs"))
+        os.remove(os.path.join(d, "src/Credit.Shared/Moved.cs"))
+        w("src/Credit.Shared/Enums/Moved.cs", moved + "    D,\n}\n")
+        w("src/Credit.Client/Pages/Limits.razor", '@page "/limits"\n<h1>Limits</h1>\n@code {\n}\n')
+        w("src/Credit.Client/Shared/Badge.razor", "<span>@Text</span>\n@code {\n    [Parameter] public string Text { get; set; }\n}\n")
+        w("tests/Credit.Tests/LimitTests.cs", "public class LimitTests\n{\n    [Fact] public void T() { }\n}\n")
+        w("src/Readme.md", "x\n")
+        _git([*g, "add", "-A"], d)
+        _git([*g, "commit", "-q", "-m", "run"], d)
+        t = numstat_totals(base, d)
+        w("app/requirements/archived/req-x/req-x.plan.md", f"# Plan\n\n**Base:** `{base[:12]}`\n")
+        found = plan_base("req-x", d)
+        traversal = plan_base("../req-x", d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    return [
+        ("new kinds classified", t.get("objDone_razorpage_new") == 1 and t.get("objDone_component_new") == 1
+         and t.get("objDone_testclass_new") == 1),
+        ("changed file is _ext", t.get("objDone_class_ext") == 2 and t.get("objDone_class_new") == 0),
+        ("deleted file only in codeRemoved", t.get("codeRemoved") == 3),
+        ("code added split test vs prod", t.get("codeAddedTest") == 4 and t.get("codeAddedProd") == 1 + 4 + 4 + 1),
+        ("existing totals unchanged", t.get("otherAdded") == 1 and t.get("filesChanged") == 7),
+        ("run base read from the archived plan", found == base[:12]),
+        ("plan lookup refuses a path-shaped req", traversal == ""),
+        ("no path in the totals", not any("/" in k or ".cs" in k.lower() for k in t)),
+    ]
+
+
+def _self_test_privacy(cwd: str) -> list[tuple[str, bool]]:
+    """Every string key added in schema 3, fed a path-like or free-text value: dropped."""
+    bad = ["C:/Users/mario/Customer/secret.al", "..\\secret", "/home/x/y", "a b c"]
+    out = []
+    for event, key in (("BlzEstimate", "estSource"), ("BlzEstimate", "issueNo"),
+                       ("BlzEstimate", "model"), ("BlzEstimate", "tier"), ("BlzGate", "gate")):
+        leaked = [v for v in bad if key in build(event, [f"{key}={v}"], cwd)[0]]
+        out.append((f"path-like {key} dropped", not leaked))
+    out += [
+        ("estSource outside its enum dropped", "estSource" not in build("BlzEstimate", ["estSource=guess"], cwd)[0]),
+        ("caller cannot pass parsed plan counts", "obj_table_new" not in build("BlzEstimate", ["obj_table_new=9"], cwd)[1]),
+        ("caller cannot pass active time", "activeSeconds" not in build("BlzRun", ["activeSeconds=9"], cwd)[1]),
+        ("issueNo stays a string", build("BlzEstimate", ["issueNo=0042"], cwd)[0].get("issueNo") == "0042"),
+    ]
+    return out
+
+
+def _self_test_issue(cwd: str) -> list[tuple[str, bool]]:
+    """The session's BC Issue link: set by BlzIssue, carried by later events, digits only."""
+    import tempfile
+
+    import ident
+
+    keys = ("BLZ_LIVE_DIR", "CLAUDE_PLUGIN_DATA", "BLZ_METRICS_APPINSIGHTS_DISABLE")
+    backup = {k: os.environ.get(k) for k in keys}
+    base = tempfile.mkdtemp(prefix="blz-issue-")
+    s = "sess-issue-self-test"
+    try:
+        os.environ.update({"BLZ_LIVE_DIR": os.path.join(base, "live"), "CLAUDE_PLUGIN_DATA": base,
+                           "BLZ_METRICS_APPINSIGHTS_DISABLE": "1"})
+        before = build("BlzLane", ["result=ran"], cwd, s)[0]
+        main(["BlzIssue", "issueNo=Customer-X", "source=user", "--session", s])
+        junk = ident.issue_no(s)
+        main(["BlzIssue", "issueNo=4821", "source=spec", "--session", s])
+        after = build("BlzLane", ["result=ran"], cwd, s)[0]
+        est = build("BlzEstimate", ["issueNo=99"], cwd, s)[0]
+        free = build("BlzIssue", ["issueNo=4821", "source=fix the invoice bug"], cwd, s)[0]
+        with open(os.path.join(base, "metrics", "blz-metrics.jsonl"), encoding="utf-8") as fh:
+            recs = [json.loads(x) for x in fh if x.strip()]
+        main(["BlzIssue", "issueNo=0", "--session", s])
+        gone = build("BlzLane", ["result=ran"], cwd, s)[0]
+        return [
+            ("issue: absent before a link", "issueNo" not in before),
+            ("issue: a non-numeric value links nothing", junk == ""),
+            ("issue: later events of the session carry it", after.get("issueNo") == "4821"),
+            ("issue: an explicit issueNo wins over the link", est.get("issueNo") == "99"),
+            ("issue: free-text source dropped", "source" not in free),
+            ("issue: one BlzIssue record, enum source kept",
+             len(recs) == 1 and recs[0]["event"] == "BlzIssue"
+             and recs[0]["props"].get("issueNo") == "4821" and recs[0]["props"].get("source") == "spec"),
+            ("issue: 0 clears the link", "issueNo" not in gone),
+        ] + _self_test_spec(base)
+    finally:
+        for k, v in backup.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _self_test_spec(base: str) -> list[tuple[str, bool]]:
+    """The spec header is the source: Issue and agent estimate read by the script."""
+    import contextlib
+    import io as _io
+
+    import ident
+
+    proj = os.path.join(base, "proj")
+    spec_dir = os.path.join(proj, "app", "requirements", "in-progress", "0042-ddt")
+    os.makedirs(spec_dir)
+    subprocess.run(["git", "init", "-q", "-b", "feature/0042-ddt", proj], capture_output=True)
+
+    def spec(issue_line: str, est_line: str = "") -> None:
+        with open(os.path.join(spec_dir, "0042-ddt.spec.md"), "w", encoding="utf-8") as fh:
+            fh.write("# 0042-ddt\n\n**Version:** 1.0\n**Branch:** `feature/0042-ddt`\n"
+                     f"{issue_line}\n{est_line}\n\n---\n\nCustomer ACME, **BC Issue:** 999 in the body\n")
+
+    def from_branch(sess: str) -> str:
+        buf = _io.StringIO()
+        old = os.environ.get("CLAUDE_PROJECT_DIR")
+        os.environ["CLAUDE_PROJECT_DIR"] = proj
+        try:
+            with contextlib.redirect_stdout(buf):
+                main(["BlzIssue", "--from-branch", "--session", sess])
+        finally:
+            if old is None:
+                os.environ.pop("CLAUDE_PROJECT_DIR", None)
+            else:
+                os.environ["CLAUDE_PROJECT_DIR"] = old
+        return buf.getvalue().strip()
+
+    spec("**BC Issue:** 4821 (IL-2026-118)", "**Agent estimate:** P50 55 min · P80 106 min (stima-sviluppo)")
+    s1 = "sess-spec-self-test-1"
+    linked = from_branch(s1)
+    again = from_branch(s1)
+    by_req = spec_facts(proj, req="0042-ddt") or {}
+    spec("**BC Issue:** none")
+    none = from_branch("sess-spec-self-test-2")
+    spec("**Complexity:** MEDIUM")
+    missing = from_branch("sess-spec-self-test-3")
+    spec("**BC Issue:** ACME invoices are wrong")
+    text = from_branch("sess-spec-self-test-4")
+    spec("**BC Issue:** 77", "**Agent estimate:** P50 30 min · P80 60 min (guess)")
+    odd = spec_facts(proj, req="0042-ddt") or {}
+    other = spec_facts(proj, branch="feature/other")
+    with open(os.path.join(base, "metrics", "blz-metrics.jsonl"), encoding="utf-8") as fh:
+        sent = [json.loads(x) for x in fh if x.strip()]
+    spec_events = [r for r in sent if r["event"] == "BlzIssue" and r["props"].get("issueNo") == "4821"
+                   and r["props"].get("session") == s1[:8]]
+    return [
+        ("spec: the branch's spec links the session", linked == "issue=4821" and ident.issue_no(s1) == "4821"),
+        ("spec: a second start does not emit again", again == "issue=4821" and len(spec_events) == 1),
+        ("spec: issue and estimate found by req",
+         by_req.get("issue") == "4821" and by_req.get("p50") == "55" and by_req.get("p80") == "106"
+         and by_req.get("estSource") == "stima-sviluppo"),
+        ("spec: none is reported, nothing linked", none == "issue=none" and not ident.issue_no("sess-spec-self-test-2")),
+        ("spec: a spec without the line is reported missing", missing == "issue=missing"),
+        ("spec: free text on the line links nothing", text == "issue=missing" and not ident.issue_no("sess-spec-self-test-4")),
+        ("spec: an estimate source outside the enum is dropped", odd.get("p50") == "30" and "estSource" not in odd),
+        ("spec: another branch has no spec", other is None),
+        ("spec: only the header is read, never the body", by_req.get("issue") != "999"),
+    ]
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

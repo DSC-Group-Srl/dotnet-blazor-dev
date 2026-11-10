@@ -8,7 +8,7 @@
 # other agent (blazor-developer, blazor-implement-subagent, ...) is
 # unaffected. Mirrors bc-dev's tools/conductor-guard/pretooluse_hook.sh.
 #
-# Wired from hooks/hooks.json on PreToolUse (matcher: Write|Edit).
+# Run on PreToolUse Write|Edit by tools/hooks/pretooluse.sh (hooks/hooks.json).
 set -euo pipefail
 
 INPUT="$(cat)"

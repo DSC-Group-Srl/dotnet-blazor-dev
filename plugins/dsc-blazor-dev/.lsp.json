@@ -1,7 +1,11 @@
 {
   "csharp": {
     "command": "cmd",
-    "args": ["/c", "bash", "${CLAUDE_PLUGIN_ROOT}/tools/dotnet-cli/csharp-lsp-launch.sh"],
+    "args": [
+      "/c",
+      "${CLAUDE_PLUGIN_ROOT}/tools/environment/run-bash.cmd",
+      "${CLAUDE_PLUGIN_ROOT}/tools/dotnet-cli/csharp-lsp-launch.sh"
+    ],
     "extensionToLanguage": {
       ".cs": "csharp",
       ".razor": "csharp",

@@ -163,3 +163,10 @@ When your work is complete and approved by the user:
 
 CRITICAL: NEVER auto-delegate. Always present your output to the user and wait for explicit approval before delegating. This is a HITL gate.
 </workflow>
+
+## Large files
+
+Never load a source file over ~350 lines whole: the read-guard denies it in a project
+initialized with this plugin. `Grep` for the class or method and `Read` with `offset`/`limit`,
+or ask `blazor-file-reader` for the exact ranges. Editing never needs a full read. Never create
+a git branch yourself.

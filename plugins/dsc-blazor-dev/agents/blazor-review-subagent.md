@@ -39,3 +39,10 @@ Respect the review-depth flag passed by the Conductor (`light`: verdict + issues
 ```
 
 Do not implement fixes. Return the review to the Conductor and stop.
+
+## Large files
+
+Never load a source file over ~350 lines whole: the read-guard denies it in a project
+initialized with this plugin. `Grep` for the class or method and `Read` with `offset`/`limit`,
+or ask `blazor-file-reader` for the exact ranges. Editing never needs a full read. Never create
+a git branch yourself.

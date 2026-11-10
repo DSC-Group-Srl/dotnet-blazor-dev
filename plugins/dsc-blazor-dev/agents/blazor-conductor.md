@@ -71,6 +71,42 @@ More phases → return to 2A. All complete → Phase 3.
 2. Save key decisions to memory / append to `CLAUDE.md` at project root.
 3. Present completion summary to the user with next-step recommendations (`/blazor-pr-prepare`, etc.).
 
+## Working rules (cost, git, questions)
+
+- **Parallel calls, never polling.** Independent reads and searches go in one message. Never
+  `sleep` or loop waiting for a subagent: its result arrives when it returns.
+- **One Bash call per step, not per command.** Chain what belongs together (`git status &&
+  git add … && git commit …`; several `emit.py` lines) in a single call.
+- **Read once, in ranges.** A subagent's report is its Task result: never re-read files to
+  confirm what it told you. Anything over ~350 lines gets a ranged `Read` (markdown included)
+  or a question to `blazor-file-reader`; the read-guard denies a whole-file read of a large
+  source file. Editing never needs a full read: a ranged read of the lines you change is enough.
+- **Git.** Work on the branch that is checked out. Never create a branch yourself and tell
+  every subagent the same ("commit on the current branch, do not create branches"). Pushing and
+  opening a pull request are the main thread's question to the user, not yours.
+- **Questions go up in plain words.** You have no `AskUserQuestion`. When you need a decision,
+  hand the main thread at most four questions, most blocking first, each saying what the choice
+  changes for the application or its users, with short options and your recommendation first.
+  A phase number or a plan section never stands alone as the subject.
+- **Tests are run, not assumed.** Never tell a subagent to skip `dotnet test`. If the user
+  accepted no tests, every report says **tests not executed**, never PASS.
+
+## Run telemetry (counts only)
+
+`$EMIT` = `python "${CLAUDE_PLUGIN_ROOT}/tools/metrics/emit.py"`. It never fails, prints nothing
+you need to read, and accepts only counts and short enum values (never a path or free text).
+A phase of your plan is one `wave` for the script. Chain the calls with the step they belong to.
+
+- After plan approval, note the base commit (`git rev-parse HEAD`) in the plan as
+  `**Base:** <sha>`, then: `$EMIT BlzRunStart req=<task-name> tier=<LOW|MEDIUM|HIGH> wpsPlanned=<phases> waves=<phases>`
+- Phase start: `$EMIT BlzWave stage=start wave=<k> waves=<N> wps=1`
+- Phase reviewed: `$EMIT BlzWave stage=end wave=<k> waves=<N> verdict=<APPROVED|NEEDS_REVISION|FAILED> passed=<tests passed> failed=<tests failed> fixLoops=<n>`
+- Right before a mid-run stop to ask the user: `$EMIT BlzGate gate=<fixloop|conflict|blocked|contradiction|other>`
+- Plan completion (or when the user stops the run):
+  `$EMIT BlzRun req=<task-name> tier=<tier> wpsPlanned=<phases> wps=<phases done> waves=<phases done> fixLoops=<n> stops=<human stops> testsPassed=<n> testsFailed=<n> reviews=<n> outcome=<done|stopped> --numstat-base <Base commit>`
+
+Do not report a duration: the script measures it.
+
 ## Subagent Instructions
 
 ### blazor-planning-subagent
