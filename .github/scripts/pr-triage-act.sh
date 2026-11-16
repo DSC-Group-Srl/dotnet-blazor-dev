@@ -25,6 +25,10 @@ set -euo pipefail
 : "${PR_NUMBER:?PR_NUMBER is required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=.github/scripts/github-api-retry.sh
+source "$SCRIPT_DIR/github-api-retry.sh"
+
 COOLDOWN_DAYS="${COOLDOWN_DAYS:-4}"
 FIRST_PING_AGE_MIN="${FIRST_PING_AGE_MIN:-30}"
 DRY_RUN="${DRY_RUN:-false}"
@@ -35,6 +39,7 @@ BOT_LOGIN="github-actions[bot]"
 MERGE_APPROVERS_TEAM="@dotnet/skills-merge-approvers"
 
 STATE_LABELS=(
+  "pr-state/evals-in-progress"
   "pr-state/ready-for-eval"
   "waiting-on-review"
   "ready-to-merge"
@@ -58,7 +63,7 @@ summary() {
 # Fetch PR metadata
 # ----------------------------------------------------------------------
 log "Fetching PR #$PR_NUMBER metadata"
-PR_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
+PR_JSON=$(gh_api_read "repos/$REPO/pulls/$PR_NUMBER")
 HEAD_SHA=$(jq -r .head.sha <<<"$PR_JSON")
 HEAD_SHA_SHORT="${HEAD_SHA:0:7}"
 AUTHOR=$(jq -r .user.login <<<"$PR_JSON")
@@ -81,6 +86,29 @@ has_label() {
   [[ ",$LABELS," == *",$needle,"* ]]
 }
 
+cache_label() {
+  local label="$1"
+  if [ -z "$LABELS" ]; then
+    LABELS="$label"
+  else
+    LABELS="$LABELS,$label"
+  fi
+}
+
+uncache_label() {
+  local label="$1"
+  local existing_label
+  local existing_labels=()
+  local kept=()
+  IFS=',' read -ra existing_labels <<<"$LABELS"
+  for existing_label in "${existing_labels[@]}"; do
+    if [ "$existing_label" != "$label" ]; then
+      kept+=("$existing_label")
+    fi
+  done
+  LABELS=$(IFS=,; echo "${kept[*]}")
+}
+
 apply_label() {
   local label="$1"
   if has_label "$label"; then
@@ -89,9 +117,11 @@ apply_label() {
   fi
   if [ "$DRY_RUN" = "true" ]; then
     log "[DRY_RUN] would add label '$label'"
+    cache_label "$label"
     return
   fi
   gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "$label" >/dev/null
+  cache_label "$label"
   log "added label '$label'"
 }
 
@@ -100,9 +130,11 @@ remove_label() {
   if ! has_label "$label"; then return; fi
   if [ "$DRY_RUN" = "true" ]; then
     log "[DRY_RUN] would remove label '$label'"
+    uncache_label "$label"
     return
   fi
   gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label" >/dev/null
+  uncache_label "$label"
   log "removed label '$label'"
 }
 
@@ -127,7 +159,7 @@ seconds_since_marker() {
   local newest
   # NB: --paginate runs --jq per page, so per-page aggregations (sort | last) would yield
   # one value per page. Emit one .created_at per match and pick the max in the shell.
-  newest=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+  newest=$(gh_api_read --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
     --jq ".[] | select(.user.login == \"$BOT_LOGIN\") | select(.body | contains(\"$marker_substr\")) | .created_at" \
     | sort | tail -n 1)
   if [ -z "$newest" ] || [ "$newest" = "null" ]; then
@@ -159,7 +191,7 @@ post_comment() {
 # Helpers — review state via GraphQL
 # ----------------------------------------------------------------------
 review_data() {
-  gh api graphql -f query='
+  gh_api_read graphql -f query='
     query($owner:String!,$repo:String!,$num:Int!){
       repository(owner:$owner,name:$repo){
         pullRequest(number:$num){
@@ -177,7 +209,7 @@ review_data() {
 # Helpers — evaluation status
 # ----------------------------------------------------------------------
 eval_status_state() {
-  gh api "repos/$REPO/statuses/$HEAD_SHA" \
+  gh_api_read "repos/$REPO/statuses/$HEAD_SHA" \
     --jq '[.[] | select(.context == "evaluation-status")] | (sort_by(.created_at) | last) | .state // "pending"'
 }
 
@@ -198,10 +230,10 @@ eval_run_exists_for_head() {
   # conclusion=="skipped"; in a real evaluation at least one is non-skipped
   # (success/failure, or null while still in progress).
   local run_ids id real
-  run_ids=$(gh api --paginate "repos/$REPO/actions/workflows/evaluation.yml/runs?head_sha=$HEAD_SHA" \
+  run_ids=$(gh_api_read --paginate "repos/$REPO/actions/workflows/evaluation.yml/runs?head_sha=$HEAD_SHA" \
     --jq '.workflow_runs[].id')
   for id in $run_ids; do
-    real=$(gh api --paginate "repos/$REPO/actions/runs/$id/jobs" \
+    real=$(gh_api_read --paginate "repos/$REPO/actions/runs/$id/jobs" \
       --jq '[.jobs[] | select((.name == "gate" or .name == "discover") and .conclusion != "skipped")] | length' \
       | awk '{s+=$1} END{print s+0}')
     if [ "${real:-0}" -gt 0 ]; then
@@ -216,7 +248,7 @@ eval_run_exists_for_head() {
   # an older head never masks a head that still needs evaluation. The 100
   # most-recent dispatch runs are ample given the hourly triage cadence.
   local dispatched
-  dispatched=$(gh api "repos/$REPO/actions/workflows/evaluation.yml/runs?event=workflow_dispatch&per_page=100" \
+  dispatched=$(gh_api_read "repos/$REPO/actions/workflows/evaluation.yml/runs?event=workflow_dispatch&per_page=100" \
     --jq ".workflow_runs[] | select(.display_title == \"Evaluate PR #$PR_NUMBER @ $HEAD_SHA_SHORT\") | .id" \
     | head -n 1)
   [ -n "$dispatched" ] && return 0
@@ -339,8 +371,10 @@ if [ -z "$STATE" ]; then
       else
         STATE="in-review"
       fi
+    elif [ "$EVAL_STATE" = "pending" ] && eval_run_exists_for_head; then
+      STATE="evals-in-progress"
     else
-      # eval has not succeeded yet
+      # No evaluation is running for this head, or the last one failed.
       STATE="ready-for-eval"
     fi
   fi
@@ -357,6 +391,7 @@ case "$STATE" in
     : ;;  # do not reconcile labels for skip/scan-only states
   needs-author-attention)         reconcile_state_label "waiting-on-author" ;;
   ready-for-eval)                 reconcile_state_label "pr-state/ready-for-eval" ;;
+  evals-in-progress)              reconcile_state_label "pr-state/evals-in-progress" ;;
   ready-for-review)               reconcile_state_label "waiting-on-review" ;;
   ready-for-merge)                reconcile_state_label "ready-to-merge" ;;
   in-review)                      reconcile_state_label "pr-state/in-review" ;;
@@ -409,6 +444,7 @@ do_eval_trigger() {
   if gh workflow run evaluation.yml --repo "$REPO" \
        -f pr_number="$PR_NUMBER" \
        -f head_sha="$HEAD_SHA_SHORT" >/dev/null; then
+    reconcile_state_label "pr-state/evals-in-progress"
     log "eval-trigger: dispatched evaluation.yml for PR #$PR_NUMBER @ $HEAD_SHA_SHORT"
     summary "  - action: eval-trigger (dispatched evaluation.yml)"
   else
@@ -481,7 +517,7 @@ EOF
     local files_json owners_str
     # NB: --paginate runs --jq per page, so '[.[] | .filename]' would emit one JSON array
     # per page. Emit one filename per line, then slurp into a single JSON array.
-    files_json=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[] | .filename' \
+    files_json=$(gh_api_read --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[] | .filename' \
       | jq -R . | jq -s .)
     owners_str=""
     if [ -f ".github/CODEOWNERS" ]; then
@@ -538,6 +574,9 @@ case "$STATE" in
     ;;
   ready-for-eval)
     do_eval_trigger
+    ;;
+  evals-in-progress)
+    log "no action for state=evals-in-progress"
     ;;
   ready-for-review|ready-for-merge)
     do_maintainer_ping
