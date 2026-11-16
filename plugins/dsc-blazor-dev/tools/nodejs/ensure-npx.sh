@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+#
+# Node.js/npx bootstrap hook — ensures `npx` (bundled with Node.js) is
+# installed and meets the playwright MCP server's minimum Node >= 20
+# requirement, so .mcp.json's "playwright" server
+# (npx -y @playwright/mcp@latest) has something to run.
+#
+# Run on SessionStart by tools/hooks/sessionstart.sh (hooks/hooks.json). Emits the Copilot hook output
+# contract on stdout, same shape as tools/dotnet-cli/ensure-dotnet-tools.sh.
+set -euo pipefail
+
+EVENT="${1:-SessionStart}"
+MIN_NODE_MAJOR=20
+
+emit() {
+  # JSON-escape the message: backslashes, double quotes, CR/LF/TAB.
+  # Windows paths interpolated into the text (CLAUDE_PLUGIN_ROOT, analyzer
+  # folders) are why this cannot be a bare printf -- a C:\Users\... path
+  # emits an invalid \U escape and the harness rejects the whole payload.
+  # The backslash and quote literals are built with printf octal escapes so
+  # this function contains no raw backslash that an editor or generator can
+  # silently halve -- that halving is exactly how the original bug survived.
+  local esc bs dq
+  bs=$(printf '\134')   # backslash
+  dq=$(printf '\042')   # double quote
+  esc="$1"
+  # NOTE: BOTH pattern and replacement MUST be quoted -- an unquoted $bs is
+  # read as the pattern escape character (matches nothing), and an unquoted
+  # replacement collapses $bs$bs back to a single backslash.
+  esc="${esc//"$bs"/"$bs$bs"}"
+  esc="${esc//"$dq"/"$bs$dq"}"
+  esc="${esc//$'\r'/}"
+  esc="${esc//$'\n'/${bs}n}"
+  esc="${esc//$'\t'/${bs}t}"
+  printf '{"hookSpecificOutput":{"hookEventName":"%s","additionalContext":"%s"}}\n' "$EVENT" "$esc"
+}
+
+if command -v npx >/dev/null 2>&1; then
+  node_version="$(node --version 2>/dev/null || true)"
+  node_major="${node_version#v}"
+  node_major="${node_major%%.*}"
+  if [[ "$node_major" =~ ^[0-9]+$ ]] && [ "$node_major" -lt "$MIN_NODE_MAJOR" ]; then
+    emit "npx is installed but Node.js is $node_version, below the v$MIN_NODE_MAJOR the playwright MCP server (.mcp.json) requires. Left untouched in case a version manager (nvm/fnm/volta) manages it - tell the user to upgrade Node.js to >= $MIN_NODE_MAJOR, then restart the session."
+  fi
+  exit 0
+fi
+
+if command -v node >/dev/null 2>&1; then
+  # A Node.js binary exists but npx does not - this is a broken/partial
+  # install (commonly a version manager like nvm/fnm/nvm-windows whose
+  # active version was installed without npm bundled). Do NOT auto-install a
+  # second, competing Node.js here: that would silently create a PATH
+  # conflict with whatever the user's version manager is doing. Report it
+  # and let the human fix the version manager's install instead.
+  node_version="$(node --version 2>/dev/null || true)"
+  emit "node ($node_version) is on PATH but npx is not - looks like a broken or partial Node.js install (common with version managers like nvm/fnm/nvm-windows whose active version was installed without npm bundled). Left untouched rather than auto-installing a second, competing Node.js. The playwright MCP server (.mcp.json) will not start until npm/npx is restored for this Node install (e.g. reinstall/repair the active version via your version manager) - tell the user."
+  exit 0
+fi
+
+# No Node.js at all - try to install Node.js LTS (which bundles npx) via
+# whatever non-interactive package manager is already on this machine.
+# Deliberately skip anything that could hang on a prompt (no sudo without
+# -n, no piping a remote installer script into bash) - a package manager's
+# own signature/provenance checks are the safety line we don't want to skip.
+install_msg=""
+if command -v winget >/dev/null 2>&1; then
+  if winget install --id OpenJS.NodeJS.LTS -e --silent --accept-package-agreements --accept-source-agreements >/dev/null 2>&1; then
+    install_msg="installed via 'winget install OpenJS.NodeJS.LTS'"
+  fi
+elif command -v brew >/dev/null 2>&1; then
+  if brew install node >/dev/null 2>&1; then
+    install_msg="installed via 'brew install node'"
+  fi
+elif command -v apt-get >/dev/null 2>&1; then
+  if sudo -n apt-get update >/dev/null 2>&1 && sudo -n apt-get install -y nodejs npm >/dev/null 2>&1; then
+    install_msg="installed via 'apt-get install -y nodejs npm'"
+  fi
+elif command -v dnf >/dev/null 2>&1; then
+  if sudo -n dnf install -y nodejs npm >/dev/null 2>&1; then
+    install_msg="installed via 'dnf install -y nodejs npm'"
+  fi
+elif command -v yum >/dev/null 2>&1; then
+  if sudo -n yum install -y nodejs npm >/dev/null 2>&1; then
+    install_msg="installed via 'yum install -y nodejs npm'"
+  fi
+elif command -v pacman >/dev/null 2>&1; then
+  if sudo -n pacman -Sy --noconfirm nodejs npm >/dev/null 2>&1; then
+    install_msg="installed via 'pacman -S nodejs npm'"
+  fi
+elif command -v zypper >/dev/null 2>&1; then
+  if sudo -n zypper install -y nodejs npm >/dev/null 2>&1; then
+    install_msg="installed via 'zypper install -y nodejs npm'"
+  fi
+fi
+
+if [ -n "$install_msg" ]; then
+  emit "Node.js/npx was missing entirely and Node.js was just $install_msg. The playwright MCP server (.mcp.json) needs it - restart this session so the refreshed PATH takes effect."
+else
+  emit "BLOCKING: Node.js/npx (npx is bundled with Node.js >= $MIN_NODE_MAJOR) is not installed and could not be auto-installed (no winget/brew/dnf/yum/pacman/zypper found, or the package manager needs interactive sudo which is not configured here). The playwright MCP server (.mcp.json) cannot start without it. Refuse any task that needs playwright (XLIFF/translation creation, refresh, or review-state work) until the user installs Node.js >= $MIN_NODE_MAJOR from https://nodejs.org or their platform's package manager and restarts the session - do not substitute hand-written or guessed translations for the real tool."
+fi
