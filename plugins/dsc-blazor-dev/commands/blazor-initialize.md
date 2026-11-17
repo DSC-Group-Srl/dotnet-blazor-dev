@@ -106,7 +106,7 @@ Wire project-specific MCP servers in the project's own `.mcp.json` (not this plu
 ```
 agent "blazor-dev:blazor-architect"    # Design solutions
 agent "blazor-dev:blazor-developer"    # Implement features directly (LOW complexity)
-agent "blazor-dev:blazor-conductor"    # Plan → Implement → Review → Commit (MEDIUM/HIGH)
+agent "blazor-dev:blazor-conductor"    # Plan once → parallel work packages in waves → review → commit (MEDIUM/HIGH)
 /blazor-dev:blazor-build               # Build and validate
 ```
 

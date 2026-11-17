@@ -1,6 +1,6 @@
 ---
 name: skill-plugin-feedback
-description: File the user's complaint about the blazor-dev plugin itself as a GitHub issue on DSC-Group-Srl/dscgroup-bc-nav-agentic-dev with the gh CLI. Use it when the user complains about how blazor-dev behaves (an agent, skill, slash command, hook, the read-guard, the main-thread guard, HITL gates, speed, token cost, wrong routing, a bad result from the framework), or when the user pushes an agent to work against the plugin's design (skip TDD or tests, put server-only code in the Client project, skip HITL confirmations, deploy unprompted, disable a guard or hook, ignore the project's rules, bypass blazor-conductor's phases). Do not use it for bugs in the user's own application code; that is blazor-triage.
+description: File the user's complaint about the blazor-dev plugin itself as a GitHub issue on DSC-Group-Srl/dscgroup-bc-nav-agentic-dev with the gh CLI. Use it when the user complains about how blazor-dev behaves (an agent, skill, slash command, hook, the read-guard, the main-thread guard, HITL gates, speed, token cost, wrong routing, a bad result from the framework), or when the user pushes an agent to work against the plugin's design (skip TDD or tests, put server-only code in the Client project, skip HITL confirmations, deploy unprompted, disable a guard or hook, ignore the project's rules, bypass blazor-conductor's waves). Do not use it for bugs in the user's own application code; that is blazor-triage.
 ---
 
 # Plugin Feedback: turn a complaint into an issue

@@ -504,7 +504,7 @@ def parse_plan(path: str, cwd: str) -> tuple[dict[str, float], dict[str, str]]:
         elif hl and hl[0] == "wp":
             wi = hl.index("wave") if "wave" in hl else -1
             di = hl.index("domains") if "domains" in hl else -1
-            tci = next((i for i, h in enumerate(hl) if h.startswith("test codeunit")), -1)
+            tci = next((i for i, h in enumerate(hl) if h.startswith(("test codeunit", "test class"))), -1)
             for r in rows:
                 if not re.match(r"^WP-?\d+", r[0], re.I):
                     continue
@@ -514,10 +514,13 @@ def parse_plan(path: str, cwd: str) -> tuple[dict[str, float], dict[str, str]]:
                 if 0 <= di < len(r):
                     domains += " " + r[di].lower()
                 if 0 <= tci < len(r):
-                    wp_tests += len(re.findall(r"\b\d{4,}\b", r[tci]))
+                    ids = len(re.findall(r"\b\d{4,}\b", r[tci]))
+                    # AL names test codeunits by ID; .NET test classes by name, one per comma.
+                    wp_tests += ids or len([t for t in r[tci].split(",") if t.strip(" `—-")])
             ok_wp = True
     meas["wavesPlanned"] = float(len(waves))
-    planned_tests = meas["obj_testcodeunit_new"] + meas["obj_testcodeunit_ext"]
+    planned_tests = (meas["obj_testcodeunit_new"] + meas["obj_testcodeunit_ext"]
+                     + meas["obj_testclass_new"] + meas["obj_testclass_ext"])
     meas["testCodeunitsPlanned"] = planned_tests if planned_tests else float(wp_tests)
     meas["hasEvents"] = 1.0 if re.search(r"\bevents?\b", domains) else 0.0
     meas["hasApi"] = 1.0 if re.search(r"\bapi\b", domains) or meas["obj_apipage_new"] + meas["obj_apipage_ext"] else 0.0

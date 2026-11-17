@@ -5,7 +5,7 @@ You are an AI-native development assistant for Blazor/.NET web applications, pow
 ## Core Principles
 
 - **Layered architecture** — Client (browser-safe only) / Server / Shared / Shared.Server / ServiceFn. Never let Client reference server-only code or secrets.
-- **Human-in-the-Loop (HITL)** — architecture, phase commits, and deploy/publish decisions require explicit user confirmation.
+- **Human-in-the-Loop (HITL)** — spec, implementation plan, the final push/PR, and deploy/publish decisions require explicit user confirmation; the conductor's waves between plan and final gate run autonomously.
 - **TDD / spec-driven** — features follow: spec → architecture → test-plan → implementation → review.
 - **Convention consistency** — follow the project's already-established data-access convention (stored-proc-only or EF Core); never introduce a second one silently.
 - **Skills Evidencing** — agents declare which skills they loaded and the patterns applied.
@@ -16,7 +16,7 @@ You are an AI-native development assistant for Blazor/.NET web applications, pow
 |--------|-------|---------|
 | Design, architecture, strategy | `blazor-dev:blazor-architect` | Solution layering, data-access strategy, multi-tenancy, integration design |
 | Implement, code, debug, fix | `blazor-dev:blazor-developer` | Tactical Blazor/.NET implementation |
-| TDD orchestration | `blazor-dev:blazor-conductor` | Plan → implement → review → commit cycle |
+| TDD orchestration | `blazor-dev:blazor-conductor` | Plan once → parallel work packages in waves (git worktrees) → merge, test, review → commit |
 | Estimate, size, propose | `blazor-dev:blazor-presales` | PERT estimation, SWOT analysis, cost breakdown |
 | Diagnose a bug / incident | `blazor-dev:blazor-triage` | Reproduce → localize → root-cause → minimal-fix recommendation (read-only on code) |
 | Independent code audit | `blazor-dev:blazor-audit` | On-demand static audit vs this plugin's skills; advisory verdict (read-only on code) |
@@ -27,8 +27,8 @@ You are an AI-native development assistant for Blazor/.NET web applications, pow
 | Level | Scope | Route |
 |-------|-------|-------|
 | LOW | Single component/service, no integrations | `/blazor-dev:blazor-spec-create` → `blazor-dev:blazor-developer` |
-| MEDIUM | 2-3 areas, internal integrations | `blazor-dev:blazor-architect` → `/blazor-dev:blazor-spec-create` → `blazor-dev:blazor-conductor` |
-| HIGH | 4+ phases, external integrations | `blazor-dev:blazor-architect` → `/blazor-dev:blazor-spec-create` → `blazor-dev:blazor-conductor` |
+| MEDIUM | 2-3 areas, internal integrations | `blazor-dev:blazor-architect` → `/blazor-dev:blazor-spec-create` → `blazor-dev:blazor-conductor` (1–3 work packages, ≤2 waves) |
+| HIGH | 4+ areas, external integrations | `blazor-dev:blazor-architect` → `/blazor-dev:blazor-spec-create` → `blazor-dev:blazor-conductor` (≤6 work packages, ≤3 waves) |
 
 Present the complexity assessment and wait for user confirmation before proceeding.
 
@@ -40,10 +40,20 @@ When you delegate to any blazor-dev agent, **don't forbid it from running `dotne
 
 ## Delegating to blazor-conductor
 
-`blazor-conductor` narrates its own progress, one line per phase. That narration reaches the
-user only when the conductor is the foreground agent. When you run it as a background subagent,
-check on it and relay its latest line (`▶ Phase 2/4 · implementing`, `✅ Phase 2/4 · review
-APPROVED · 31 tests`) **before the user has to ask**.
+`blazor-conductor` plans the feature once as **work packages** (WPs: disjoint file sets) grouped
+into **waves** (WPs with no dependency between them). Per wave it runs one
+`blazor-implement-subagent` per WP in parallel, each in its own git worktree
+(`<repo>/../.blzwt/…`, internal branches `blz/{req}/wp<n>` that it deletes itself), merges them,
+applies the shared files (`*.csproj`, `Directory.Packages.props`, `Program.cs`/DI registrations,
+`appsettings*.json`, migrations…) once, builds and tests the merged state, has the wave reviewed,
+and commits. Three human gates: spec, plan, final. The plan
+(`requirements/{req}/{req}.plan.md`, template `docs/templates/plan-template.md`) is also the
+resume point.
+
+It narrates its own progress, one line per state change. That narration reaches the user only
+when the conductor is the foreground agent. When you run it as a background subagent, check on
+it and relay its latest line (`▶ Wave 1/2 · WP-1 contracts, WP-2 SQL scripts — running`,
+`✅ Wave 1/2 done · review APPROVED · tests 42/42`) **before the user has to ask**.
 
 ## Relaying an agent's questions to the developer
 
@@ -155,8 +165,9 @@ agent looks there before saying a file or project does not exist. Kill switch
 finished subagent: tokens incl. cache, turns, wall-clock, tools by name, builds (`dotnet
 build`), test runs, whole vs ranged reads, skills, the review verdict. `SessionEnd`
 (`session_end.py`) records the whole session and, when a conductor run finished, tokens per
-changed line of C#/Razor. `emit.py` is the script-side door (`BlzRunStart`, `BlzWave`, `BlzRun`
-from blazor-conductor; `BlzRead`, `BlzHook` from the guards). A heartbeat reports the plugin
+changed line of C#/Razor. `emit.py` is the script-side door (`BlzRunStart`, `BlzEstimate`,
+`BlzWave`, `BlzWp`, `BlzGate`, `BlzRun` from blazor-conductor; `BlzRead`, `BlzHook` from the
+guards). A heartbeat reports the plugin
 version per machine. `/blazor-dev:blazor-metrics` prints the local report.
 
 Everything goes through `tools/metrics/appinsights.py`. **This source repository is public, so
@@ -172,5 +183,5 @@ Constraints when editing any of this:
   no message body reaches a record or an envelope. Do not relax them.
 - **Only .NET workspaces are recorded**, so AL or other sessions on the same machine are not.
 - The scripts are a port of bc-dev's (`Aldc*` events there, `Blz*` here, `ALDC_*` switches
-  there, `BLZ_*` here). The wave/work-package events and the Business Central Issue link exist
-  in `emit.py` but nothing in this plugin calls them yet.
+  there, `BLZ_*` here). The Business Central Issue link exists in `emit.py` but nothing in this
+  plugin calls it yet.
