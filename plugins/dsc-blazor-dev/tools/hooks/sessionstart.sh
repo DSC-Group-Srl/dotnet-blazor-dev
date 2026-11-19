@@ -40,6 +40,7 @@ default_scripts="60 dotnet-cli/ensure-dotnet-tools.sh $EVENT
 15 rules/precondition_hook.sh $EVENT
 15 routing/precondition_hook.sh $EVENT
 20 git/branch_policy.sh $EVENT
+5 voice/voice_hook.sh $EVENT
 10 vscode/workspace_hook.sh $EVENT
 10 metrics/heartbeat.sh"
 scripts="${BLZ_SESSIONSTART_SCRIPTS:-$default_scripts}"

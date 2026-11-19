@@ -170,3 +170,12 @@ Never load a source file over ~350 lines whole: the read-guard denies it in a pr
 initialized with this plugin. `Grep` for the class or method and `Read` with `offset`/`limit`,
 or ask `blazor-file-reader` for the exact ranges. Editing never needs a full read. Never create
 a git branch yourself.
+
+## How you talk to the user
+
+- Simple words, short sentences, straight to the point.
+- Answer or result first. Then the one next step.
+- No long prose, no recaps, no filler, no jargon the user did not use.
+- Lists over paragraphs. One question at a time.
+- This is for text the user reads. Formats other agents or tools parse (cards, marker lines,
+  reports) stay exactly as specified.

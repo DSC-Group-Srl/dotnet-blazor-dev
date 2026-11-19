@@ -14,7 +14,9 @@
 #   2. runs tools/metrics/alive.sh in the background (never blocks, never prints);
 #   3. routes by tool_name and feeds the same stdin to the guards:
 #        Read                 -> tools/read-guard/pretooluse_hook.sh
-#        Bash|PowerShell      -> tools/read-guard/pretooluse_hook.sh
+#        Bash|PowerShell      -> tools/git/merge_guard.sh (asks the user before a merge of a
+#                                pull request someone else opened),
+#                                then tools/read-guard/pretooluse_hook.sh
 #        Write|Edit           -> tools/conductor-guard/pretooluse_hook.sh,
 #                                then tools/main-thread-guard/pretooluse_hook.sh
 #      any other tool         -> exit 0, silent.
@@ -27,7 +29,7 @@
 # is treated as "no decision". Guard stderr is passed through unchanged.
 #
 # Each guard keeps its own kill switch (BLZ_READ_GUARD_DISABLE, BLZ_MAIN_THREAD_GUARD_DISABLE,
-# BLZ_METRICS_ALIVE_DISABLE). A new guard goes into the case below, never as a new hooks.json
+# BLZ_MERGE_GUARD_DISABLE, BLZ_METRICS_ALIVE_DISABLE). A new guard goes into the case below, never as a new hooks.json
 # entry. Self-test: tools/hooks/test_dispatchers.sh.
 set -uo pipefail
 
@@ -45,7 +47,7 @@ tool="$(printf '%s' "$INPUT" | grep -oE '"tool_name"[[:space:]]*:[[:space:]]*"[^
 
 case "$tool" in
   Read)                 guards=("read-guard/pretooluse_hook.sh") ;;
-  Bash|PowerShell)      guards=("read-guard/pretooluse_hook.sh") ;;
+  Bash|PowerShell)      guards=("git/merge_guard.sh" "read-guard/pretooluse_hook.sh") ;;
   Write|Edit)           guards=("conductor-guard/pretooluse_hook.sh" "main-thread-guard/pretooluse_hook.sh") ;;
   *)                    exit 0 ;;
 esac
