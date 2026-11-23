@@ -1,0 +1,3 @@
+# A write key for Application Insights. This repository is public: the file lives only in
+# the private marketplace copy (see tools/metrics/azure/README.md).
+tools/metrics/appinsights.connection
