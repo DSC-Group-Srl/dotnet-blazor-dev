@@ -1,0 +1,38 @@
+rules:
+  - id: dsc-tsql-dynamic-exec
+    languages: [regex]
+    severity: WARNING
+    message: >-
+      The stored procedure executes dynamic SQL built from a variable. If any input parameter is
+      concatenated into it, this is SQL injection inside the database. Use static SQL, or
+      sp_executesql with a parameter list (@params) and pass every value as a parameter; wrap
+      object names in QUOTENAME(). See blazor-dev:skill-stored-procedures.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
+      confidence: MEDIUM
+    paths:
+      include:
+        - "*.sql"
+    pattern-either:
+      - pattern-regex: (?i)\bexec(ute)?\s*\(\s*@\w+
+      - pattern-regex: (?i)\bexec(ute)?\s*\(\s*N?'(?:[^']|'')*'\s*\+
+      - pattern-regex: (?i)\bsp_executesql\s+@\w+\s*;?\s*$
+  - id: dsc-tsql-tenant-param-missing
+    languages: [regex]
+    severity: INFO
+    message: >-
+      This stored procedure has no @TenantId parameter. In a shared multi-tenant database every
+      procedure that reads or writes tenant-scoped tables must take @TenantId and filter on it.
+      Ignore for shared lookup procedures (record them in .dsc-semgrep-triage.json).
+      See blazor-dev:skill-multitenancy.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      confidence: LOW
+    paths:
+      include:
+        - "*.sql"
+    patterns:
+      - pattern-regex: (?is)\b(create|alter|create\s+or\s+alter)\s+proc(edure)?\s+[\w.\[\]]+.*?\bas\b
+      - pattern-not-regex: (?is)\b(create|alter|create\s+or\s+alter)\s+proc(edure)?\s+[\w.\[\]]+[^;]*?@TenantId\b[^;]*?\bas\b

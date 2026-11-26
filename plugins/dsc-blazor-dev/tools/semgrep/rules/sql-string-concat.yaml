@@ -1,0 +1,48 @@
+rules:
+  - id: dsc-sql-string-concat
+    languages: [csharp]
+    severity: ERROR
+    message: >-
+      SQL text is built from a variable ($SQL) and sent to the database. A value concatenated or
+      interpolated into a command is a SQL injection hole. Call a stored procedure with
+      CommandType.StoredProcedure and pass every value as a parameter (Parameters.Add /
+      AddWithValue), or use FromSqlInterpolated / ExecuteSqlInterpolated / Dapper parameters.
+      See blazor-dev:skill-stored-procedures.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      references:
+        - https://learn.microsoft.com/ef/core/querying/sql-queries#passing-parameters
+    patterns:
+      - pattern-either:
+          - pattern: new SqlCommand($SQL, ...)
+          - pattern: new SqlCommand($SQL, ...) { ... }
+          - pattern: $CMD.CommandText = $SQL
+          - pattern: $CTX.FromSqlRaw($SQL, ...)
+          - pattern: $DB.ExecuteSqlRaw($SQL, ...)
+          - pattern: $DB.ExecuteSqlRawAsync($SQL, ...)
+          - pattern: $DB.SqlQueryRaw<$T>($SQL, ...)
+          - pattern: $CONN.Query($SQL, ...)
+          - pattern: $CONN.Query<$T>($SQL, ...)
+          - pattern: $CONN.QueryAsync($SQL, ...)
+          - pattern: $CONN.QueryAsync<$T>($SQL, ...)
+          - pattern: $CONN.QueryFirstOrDefault<$T>($SQL, ...)
+          - pattern: $CONN.QueryFirstOrDefaultAsync<$T>($SQL, ...)
+          - pattern: $CONN.QuerySingleOrDefaultAsync<$T>($SQL, ...)
+          - pattern: $CONN.QueryMultipleAsync($SQL, ...)
+          - pattern: $CONN.Execute($SQL, ...)
+          - pattern: $CONN.ExecuteAsync($SQL, ...)
+          - pattern: $CONN.ExecuteScalarAsync<$T>($SQL, ...)
+      - metavariable-pattern:
+          metavariable: $SQL
+          pattern-either:
+            - pattern: '"..." + $X'
+            - pattern: '$X + "..."'
+            - pattern: $"..."
+            - pattern: string.Format(...)
+            - pattern: String.Format(...)
+            - pattern: string.Concat(...)
+            - pattern: String.Concat(...)
+            - pattern: $SB.ToString()

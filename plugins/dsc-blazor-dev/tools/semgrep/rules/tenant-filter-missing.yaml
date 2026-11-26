@@ -1,0 +1,28 @@
+rules:
+  - id: dsc-tenant-filter-missing
+    languages: [csharp]
+    severity: WARNING
+    message: >-
+      This method opens a SqlCommand but never passes a @TenantId parameter. In a multi-tenant
+      database every tenant-scoped stored procedure must receive the tenant identifier, or one
+      tenant can read or change another tenant's rows. If the procedure is genuinely
+      tenant-agnostic (shared lookup data) or the project uses one database per tenant, record
+      the finding in .dsc-semgrep-triage.json with the reason. See blazor-dev:skill-multitenancy.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      confidence: LOW
+    patterns:
+      - pattern-inside: |
+          $RET $METHOD(...) { ... }
+      - pattern-either:
+          - pattern: new SqlCommand(...)
+          - pattern: new SqlCommand(...) { ... }
+      - pattern-not-inside: |
+          $RET $METHOD(...) { ... $P.AddWithValue("@TenantId", ...); ... }
+      - pattern-not-inside: |
+          $RET $METHOD(...) { ... $P.Add("@TenantId", ...); ... }
+      - pattern-not-inside: |
+          $RET $METHOD(...) { ... $P.Add(new SqlParameter("@TenantId", ...)); ... }
+      - pattern-not-inside: |
+          $RET $METHOD(...) { ... $P.Add("@TenantId", ...).Value = $V; ... }

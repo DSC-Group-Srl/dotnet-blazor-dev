@@ -1,0 +1,22 @@
+rules:
+  - id: dsc-markupstring-untrusted
+    languages: [csharp]
+    severity: WARNING
+    message: >-
+      MarkupString renders $X as raw HTML with no encoding. If any part of it comes from a user,
+      the database or an API, this is stored or reflected XSS. Render the value as text
+      (@value), or sanitize it first with an HTML sanitizer (e.g. Ganss.Xss HtmlSanitizer) and
+      keep the sanitizer call next to the cast.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: (MarkupString)$X
+          - pattern: new MarkupString($X)
+      - pattern-not: (MarkupString)"..."
+      - pattern-not: new MarkupString("...")
+      - pattern-not: (MarkupString)$S.Sanitize(...)
+      - pattern-not: new MarkupString($S.Sanitize(...))

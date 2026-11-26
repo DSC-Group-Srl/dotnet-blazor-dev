@@ -1,0 +1,17 @@
+rules:
+  - id: dsc-markupstring-untrusted-razor
+    languages: [regex]
+    severity: WARNING
+    message: >-
+      MarkupString in Razor markup renders the value as raw HTML with no encoding. If any part of
+      it comes from a user, the database or an API, this is XSS. Render it as text, or sanitize
+      it (e.g. HtmlSanitizer.Sanitize) before the cast.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation"
+      confidence: MEDIUM
+    paths:
+      include:
+        - "*.razor"
+        - "*.cshtml"
+    pattern-regex: (\(\s*MarkupString\s*\)|new\s+MarkupString\s*\()\s*(?!"|[A-Za-z_][\w.]*\.Sanitize\s*\()

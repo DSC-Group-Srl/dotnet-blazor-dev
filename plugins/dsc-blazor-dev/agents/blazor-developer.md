@@ -54,6 +54,8 @@ You are a tactical implementation specialist for Blazor/.NET web applications. Y
 - MudBlazor wrapper components → `skill-mudblazor-components`
 - Test strategy → `skill-dotnet-testing`
 - Build/MSBuild diagnostics → `skill-build-diagnostics`
+- Analyzer warnings, banned APIs, suppressions → `skill-roslyn-analyzers`
+- Security static scan → `skill-semgrep`
 </tool_boundaries>
 
 <stopping_rules>
@@ -128,6 +130,8 @@ Bash: dotnet test                  # run xUnit/bUnit tests
 ```
 If the build fails for a reason that isn't obvious from the compiler output (stale obj/bin, MSBuild target ordering, AOT/trimming-only failures), use the **dotnet-msbuild-binlog** MCP server to analyze a binlog rather than guessing.
 
+**Analyzers**: after a green build run `python "${CLAUDE_PLUGIN_ROOT}/tools/analyzers/analyze.py" <sln> --scope lines` and fix every warning on lines you wrote. Suppress only with `[SuppressMessage(..., Justification = "...")]` on the narrowest member (`blazor-dev:skill-roslyn-analyzers`). Report the in-scope totals.
+
 **Runtime iteration (HITL hand-off by default)**: local `dotnet run`/hot-reload is fine to run yourself for a scratch check; publishing to a shared Azure environment is a human/CI step.
 
 ### 6. AOT/Trimming Awareness
@@ -156,6 +160,8 @@ Not auto-loaded — invoke the **Skill** tool with the plugin-scoped name:
 - **blazor-dev:skill-bc-integration** — Business Central OData sync (cross-references `bc-dev`'s `al-mcp` tools if both plugins are installed)
 - **blazor-dev:skill-dotnet-testing** — xUnit/bUnit test design
 - **blazor-dev:skill-build-diagnostics** — MSBuild failure diagnosis via binlog
+- **blazor-dev:skill-roslyn-analyzers** — analyzer set, BannedSymbols, rollout, suppressions
+- **blazor-dev:skill-semgrep** — Semgrep CE security scan, rules, triage
 
 **Load = invoke `Skill(skill: "blazor-dev:skill-x")`.** Naming a skill without invoking it is not loading it.
 
@@ -183,6 +189,7 @@ Omit the line entirely if no skills were loaded this response.
 - ❌ Don't guess at patterns — search for existing examples
 - ❌ Don't put secrets or connection strings in `Client/`-side code
 - ❌ Don't add package versions to individual `.csproj` files — only `Directory.Packages.props`
+- ❌ Don't silence an analyzer with `<NoWarn>`, a solution-wide `severity = none`, or a `#pragma warning disable` without restore
 - ❌ Don't write comments in code (rules, guard-enforced): only `///` doc comments and `/** */`
   JSDoc. If you want to explain a choice, either you doubt it (take the option that needs no
   defence, or ask) or it is documentation (`<remarks>`). Existing comments in the code you read

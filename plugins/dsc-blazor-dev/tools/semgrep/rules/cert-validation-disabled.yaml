@@ -1,0 +1,24 @@
+rules:
+  - id: dsc-cert-validation-disabled
+    languages: [csharp]
+    severity: ERROR
+    message: >-
+      TLS certificate validation is switched off: every certificate, including an attacker's, is
+      accepted, so traffic to Business Central, B2C or SQL can be intercepted. Remove the
+      callback. For a self-signed development certificate trust it on the machine
+      (dotnet dev-certs https --trust) instead of in code.
+    metadata:
+      category: security
+      cwe: "CWE-295: Improper Certificate Validation"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: HIGH
+    pattern-either:
+      - pattern: HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+      - pattern: $H.ServerCertificateCustomValidationCallback = (...) => true
+      - pattern: $H.RemoteCertificateValidationCallback = (...) => true
+      - pattern: ServicePointManager.ServerCertificateValidationCallback = (...) => true
+      - pattern: ServicePointManager.ServerCertificateValidationCallback += (...) => true
+      - pattern: |
+          new HttpClientHandler { ..., ServerCertificateCustomValidationCallback = (...) => true, ... }
+      - pattern: |
+          new SocketsHttpHandler { ..., SslOptions = new SslClientAuthenticationOptions { ..., RemoteCertificateValidationCallback = (...) => true, ... }, ... }

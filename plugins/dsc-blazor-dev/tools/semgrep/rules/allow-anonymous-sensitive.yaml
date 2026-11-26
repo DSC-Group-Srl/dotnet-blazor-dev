@@ -1,0 +1,67 @@
+rules:
+  - id: dsc-allow-anonymous-sensitive
+    languages: [csharp]
+    severity: WARNING
+    message: >-
+      An endpoint that changes data or a whole controller is open to anonymous callers. In a
+      B2C-protected multi-tenant API only health checks, B2C callbacks and public read-only
+      endpoints may be anonymous. Remove [AllowAnonymous] / .AllowAnonymous(), or record why it
+      is safe in .dsc-semgrep-triage.json. See blazor-dev:skill-b2c-auth.
+    metadata:
+      category: security
+      cwe: "CWE-306: Missing Authentication for Critical Function"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+    pattern-either:
+      - pattern: |
+          [AllowAnonymous]
+          class $C { ... }
+      - pattern: |
+          [AllowAnonymous]
+          [HttpPost(...)]
+          $RET $M(...) { ... }
+      - pattern: |
+          [AllowAnonymous]
+          [HttpPut(...)]
+          $RET $M(...) { ... }
+      - pattern: |
+          [AllowAnonymous]
+          [HttpPatch(...)]
+          $RET $M(...) { ... }
+      - pattern: |
+          [AllowAnonymous]
+          [HttpDelete(...)]
+          $RET $M(...) { ... }
+      - pattern: |
+          [AllowAnonymous]
+          [HttpPost]
+          $RET $M(...) { ... }
+      - pattern: |
+          [AllowAnonymous]
+          [HttpPut]
+          $RET $M(...) { ... }
+      - pattern: |
+          [AllowAnonymous]
+          [HttpPatch]
+          $RET $M(...) { ... }
+      - pattern: |
+          [AllowAnonymous]
+          [HttpDelete]
+          $RET $M(...) { ... }
+      - pattern: $APP.MapPost(...).AllowAnonymous()
+      - pattern: $APP.MapPut(...).AllowAnonymous()
+      - pattern: $APP.MapPatch(...).AllowAnonymous()
+      - pattern: $APP.MapDelete(...).AllowAnonymous()
+  - id: dsc-function-anonymous-http-trigger
+    languages: [csharp]
+    severity: WARNING
+    message: >-
+      This Azure Function accepts anonymous HTTP calls (AuthorizationLevel.Anonymous). Unless the
+      function validates a B2C/Entra bearer token itself or sits behind an authenticating gateway,
+      anyone who knows the URL can call it. Use AuthorizationLevel.Function or validate the token,
+      or record why it is safe in .dsc-semgrep-triage.json. See blazor-dev:skill-azure-functions-sync.
+    metadata:
+      category: security
+      cwe: "CWE-306: Missing Authentication for Critical Function"
+      confidence: LOW
+    pattern: AuthorizationLevel.Anonymous

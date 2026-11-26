@@ -1,0 +1,44 @@
+rules:
+  - id: dsc-jsruntime-eval
+    languages: [csharp]
+    severity: ERROR
+    message: >-
+      JS interop calls a JavaScript function that executes a string as code ($FN). Anything that
+      reaches that string runs in the user's browser session with their B2C token. Write a named
+      function in a JS module (wwwroot/js or a .razor.js collocated file) and call it with
+      IJSObjectReference. See blazor-dev:skill-blazor-js-interop.
+    metadata:
+      category: security
+      cwe: "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: $JS.InvokeAsync<$T>($FN, ...)
+          - pattern: $JS.InvokeVoidAsync($FN, ...)
+          - pattern: $JS.Invoke<$T>($FN, ...)
+          - pattern: $JS.InvokeVoid($FN, ...)
+      - metavariable-regex:
+          metavariable: $FN
+          regex: ^"(window\.)?(eval|Function|setTimeout|setInterval|execScript)"$
+  - id: dsc-jsruntime-dynamic-identifier
+    languages: [csharp]
+    severity: WARNING
+    message: >-
+      The JS function name passed to JS interop is not a constant ($FN). If it can come from user
+      input or data, the caller chooses which global JavaScript function runs. Use a fixed name or
+      a switch over known names.
+    metadata:
+      category: security
+      cwe: "CWE-470: Use of Externally-Controlled Input to Select Classes or Code"
+      confidence: LOW
+    patterns:
+      - pattern-either:
+          - pattern: (IJSRuntime $JS).InvokeAsync<$T>($FN, ...)
+          - pattern: (IJSRuntime $JS).InvokeVoidAsync($FN, ...)
+      - pattern-not: (IJSRuntime $JS).InvokeAsync<$T>("...", ...)
+      - pattern-not: (IJSRuntime $JS).InvokeVoidAsync("...", ...)
+      - pattern-not: (IJSRuntime $JS).InvokeAsync<$T>(nameof(...), ...)
+      - metavariable-regex:
+          metavariable: $FN
+          regex: ^[a-z_]

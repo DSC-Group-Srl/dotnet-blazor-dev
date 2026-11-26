@@ -1,0 +1,18 @@
+@page "/notes/{Id:int}"
+
+<h3>Note</h3>
+
+/// ruleid: dsc-markupstring-untrusted-razor
+<div>@((MarkupString)note.Body)</div>
+
+/// ruleid: dsc-markupstring-untrusted-razor
+<div>@(new MarkupString(note.Body))</div>
+
+/// ok: dsc-markupstring-untrusted-razor
+<div>@((MarkupString)"<br />")</div>
+
+/// ok: dsc-markupstring-untrusted-razor
+<div>@((MarkupString)Sanitizer.Sanitize(note.Body))</div>
+
+/// ok: dsc-markupstring-untrusted-razor
+<div>@note.Body</div>

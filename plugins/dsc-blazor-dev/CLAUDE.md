@@ -77,6 +77,8 @@ This plugin runs in the **Claude Code harness**. Agents have native tools (`Read
 | Run tests | `Bash: dotnet test` |
 | Symbol search / go-to-definition / find-references | The **C# LSP server** (`.lsp.json`, backed by `csharp-ls`) |
 | MSBuild failure diagnosis (binlog) | **dotnet-msbuild-binlog** MCP |
+| Analyzer results (SARIF + JSON summary by rule) | `python tools/analyzers/analyze.py` — see `skill-roslyn-analyzers` |
+| Security static scan (SAST) | `python tools/semgrep/semgrep_scan.py` (Semgrep CE, local rules, offline) — see `skill-semgrep` |
 | Interactive component/E2E verification | **playwright** MCP |
 | Microsoft/.NET docs | **ms-learn** MCP, or `microsoft-docs`/`context7` if connected at the session level |
 | See what changed | `Bash: git diff` / `git status` |

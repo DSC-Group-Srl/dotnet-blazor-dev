@@ -1,0 +1,23 @@
+P:System.Threading.Tasks.Task`1.Result;Blocks the thread and can deadlock (Blazor Server) or throw on the single-threaded WebAssembly runtime. Use await.
+M:System.Threading.Tasks.Task.Wait;Blocks the thread and can deadlock (Blazor Server) or throw on the single-threaded WebAssembly runtime. Use await.
+M:System.Threading.Tasks.Task.Wait(System.Int32);Blocks the thread. Use await with Task.WaitAsync(TimeSpan) for a timeout.
+M:System.Threading.Tasks.Task.Wait(System.TimeSpan);Blocks the thread. Use await with Task.WaitAsync(TimeSpan) for a timeout.
+M:System.Threading.Tasks.Task.Wait(System.Threading.CancellationToken);Blocks the thread. Use await with Task.WaitAsync(CancellationToken).
+M:System.Threading.Tasks.Task.Wait(System.Int32,System.Threading.CancellationToken);Blocks the thread. Use await with Task.WaitAsync.
+M:System.Threading.Tasks.Task.Wait(System.TimeSpan,System.Threading.CancellationToken);Blocks the thread. Use await with Task.WaitAsync.
+M:System.Threading.Tasks.Task.WaitAll(System.Threading.Tasks.Task[]);Blocks the thread. Use await Task.WhenAll.
+M:System.Threading.Tasks.Task.WaitAny(System.Threading.Tasks.Task[]);Blocks the thread. Use await Task.WhenAny.
+M:System.Runtime.CompilerServices.TaskAwaiter.GetResult;Sync-over-async: GetAwaiter().GetResult() blocks the thread. Use await.
+M:System.Runtime.CompilerServices.TaskAwaiter`1.GetResult;Sync-over-async: GetAwaiter().GetResult() blocks the thread. Use await.
+M:System.Threading.Thread.Sleep(System.Int32);Blocks the thread and freezes the WebAssembly UI. Use await Task.Delay.
+M:System.Threading.Thread.Sleep(System.TimeSpan);Blocks the thread and freezes the WebAssembly UI. Use await Task.Delay.
+M:Microsoft.AspNetCore.Components.MarkupString.#ctor(System.String);Raw HTML bypasses Blazor encoding (XSS). Render text with @value; sanitize HTML in one audited helper and suppress only there, with a justification.
+M:Microsoft.AspNetCore.Components.MarkupString.op_Explicit(System.String)~Microsoft.AspNetCore.Components.MarkupString;Raw HTML bypasses Blazor encoding (XSS). Render text with @value; sanitize HTML in one audited helper and suppress only there, with a justification.
+N:System.Data.SqlClient;System.Data.SqlClient is deprecated. Use Microsoft.Data.SqlClient.
+M:Microsoft.EntityFrameworkCore.RelationalQueryableExtensions.FromSqlRaw``1(Microsoft.EntityFrameworkCore.DbSet{``0},System.String,System.Object[]);String-built SQL is an injection risk. Use FromSql with an interpolated FormattableString (parameterized).
+M:Microsoft.EntityFrameworkCore.RelationalDatabaseFacadeExtensions.ExecuteSqlRaw(Microsoft.EntityFrameworkCore.Infrastructure.DatabaseFacade,System.String,System.Object[]);String-built SQL is an injection risk. Use ExecuteSql with an interpolated FormattableString (parameterized).
+M:Microsoft.EntityFrameworkCore.RelationalDatabaseFacadeExtensions.ExecuteSqlRaw(Microsoft.EntityFrameworkCore.Infrastructure.DatabaseFacade,System.String,System.Collections.Generic.IEnumerable{System.Object});String-built SQL is an injection risk. Use ExecuteSql with an interpolated FormattableString (parameterized).
+M:Microsoft.EntityFrameworkCore.RelationalDatabaseFacadeExtensions.ExecuteSqlRawAsync(Microsoft.EntityFrameworkCore.Infrastructure.DatabaseFacade,System.String,System.Threading.CancellationToken);String-built SQL is an injection risk. Use ExecuteSqlAsync with an interpolated FormattableString (parameterized).
+M:Microsoft.EntityFrameworkCore.RelationalDatabaseFacadeExtensions.ExecuteSqlRawAsync(Microsoft.EntityFrameworkCore.Infrastructure.DatabaseFacade,System.String,System.Object[]);String-built SQL is an injection risk. Use ExecuteSqlAsync with an interpolated FormattableString (parameterized).
+M:Microsoft.EntityFrameworkCore.RelationalDatabaseFacadeExtensions.ExecuteSqlRawAsync(Microsoft.EntityFrameworkCore.Infrastructure.DatabaseFacade,System.String,System.Collections.Generic.IEnumerable{System.Object},System.Threading.CancellationToken);String-built SQL is an injection risk. Use ExecuteSqlAsync with an interpolated FormattableString (parameterized).
+M:Microsoft.EntityFrameworkCore.RelationalDatabaseFacadeExtensions.SqlQueryRaw``1(Microsoft.EntityFrameworkCore.Infrastructure.DatabaseFacade,System.String,System.Object[]);String-built SQL is an injection risk. Use SqlQuery with an interpolated FormattableString (parameterized).

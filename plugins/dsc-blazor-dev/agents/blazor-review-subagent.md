@@ -37,10 +37,17 @@ at the same time; never build, test or publish there.
 3. **Re-check, don't trust:** in the review worktree run `dotnet build <sln> -nologo -v q` and
    compare with the implementers' build sections (new warnings on lines they wrote count). The
    conductor's test result is the test evidence; re-run a specific test class only when a
-   summary and the conductor's result disagree.
+   summary and the conductor's result disagree. Then run
+   `python "${CLAUDE_PLUGIN_ROOT}/tools/analyzers/analyze.py" <sln> --base <base> --scope lines`
+   in the review worktree.
 4. **AOT/trimming** (Client code changed and the project uses `PublishTrimmed`/AOT): if an
    implementer did not report a passing publish check, run
    `dotnet publish <Client.csproj> -c Release -o <temp folder>` in the review worktree yourself.
+5. **Security scan**: in the review worktree run
+   `python "${CLAUDE_PLUGIN_ROOT}/tools/semgrep/semgrep_scan.py" --base <base> --json --out <temp folder>`.
+   Each confirmed unsuppressed ERROR finding in this wave's diff → CRITICAL or MAJOR; a confirmed
+   WARNING → MAJOR or MINOR by impact. Semgrep missing (exit 2) → note "Semgrep: not run (not
+   installed)" in the review; it does not block.
 
 ## Checklist
 
@@ -50,6 +57,12 @@ at the same time; never build, test or publish there.
   every hit (a `//`, `/* */`, `@* *@`, `<!-- -->` or SQL `--` that is not a `///` or `/** */` doc
   comment — explanations, section headers, TODOs, Arrange/Act/Assert labels, commented-out code)
   is MAJOR (NEEDS_REVISION), not a nitpick. A comment that defends a choice → also judge the choice itself
+- **Analyzers** (`blazor-dev:skill-roslyn-analyzers`): a new security warning (RS0030, CA2100,
+  CA3xxx, CA53xx, EF1002) or a suppression listed under `suppressions.withoutJustification` is
+  MAJOR; other new analyzer warnings MINOR
+- **Static security scan** (`blazor-dev:skill-semgrep`): Semgrep findings on the wave's files — SQL
+  built by concatenation, missing `@TenantId`, `MarkupString` from data, `AllowAnonymous` on write
+  endpoints, disabled certificate validation, secrets in appsettings, JS interop `eval`
 - **Test coverage**: real tests per WP (xUnit for services/logic, bUnit for component behavior)
   that actually exercise the new code path; every acceptance criterion has a test
 - **Tenant isolation** (data access changed): every query scoped by tenant identifier, no
@@ -74,7 +87,7 @@ at the same time; never build, test or publish there.
 ## Review: Phase {wave}
 **Status:** APPROVED | NEEDS_REVISION | FAILED
 **Summary:** {1-2 sentences}
-**Build re-check:** {errors 0 · new warnings 0 | …} · AOT: {passed | not applicable | failed}
+**Build re-check:** {errors 0 · new warnings 0 · analyzers in scope 0 · unjustified suppressions 0 | …} · AOT: {passed | not applicable | failed} · Semgrep: {E/W/I | not run}
 **Issues:**
 - WP-{n} · {CRITICAL|MAJOR|MINOR} · `{file}:{line}` — {what and why}
 (or: none)

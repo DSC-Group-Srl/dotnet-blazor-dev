@@ -1,0 +1,50 @@
+rules:
+  - id: dsc-js-eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      JavaScript executes a non-constant string as code. Anything that reaches it runs in the
+      user's session with their B2C token. Call a named function instead.
+    metadata:
+      category: security
+      cwe: "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
+      confidence: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: window.eval($X)
+          - pattern: new Function(..., $X)
+          - pattern: setTimeout($X, ...)
+          - pattern: setInterval($X, ...)
+      - pattern-not: eval("...")
+      - pattern-not: setTimeout(function (...) { ... }, ...)
+      - pattern-not: setTimeout((...) => $B, ...)
+      - pattern-not: setInterval(function (...) { ... }, ...)
+      - pattern-not: setInterval((...) => $B, ...)
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern-not: function (...) { ... }
+            - pattern-not: (...) => $B
+            - pattern-not: '"..."'
+  - id: dsc-js-html-sink
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      A non-constant value is written as HTML ($SINK). If it carries user or API data this is DOM
+      XSS. Use textContent, or build elements with createElement, or sanitize with DOMPurify first.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation"
+      confidence: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: $EL.innerHTML = $X
+          - pattern: $EL.outerHTML = $X
+          - pattern: $EL.insertAdjacentHTML($POS, $X)
+          - pattern: document.write($X)
+          - pattern: document.writeln($X)
+      - pattern-not: $EL.innerHTML = "..."
+      - pattern-not: $EL.innerHTML = DOMPurify.sanitize(...)
+      - pattern-not: $EL.insertAdjacentHTML($POS, "...")
+      - pattern-not: $EL.insertAdjacentHTML($POS, DOMPurify.sanitize(...))
