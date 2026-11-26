@@ -108,20 +108,17 @@ unless the project already uses them or the user explicitly asks for them. Setti
 such as case-sensitive property matching and strict number handling can break
 existing clients. For **new projects**, or when strict JSON handling is explicitly
 requested, configure options like the following to minimize the potential of
-processing malicious requests:
+processing malicious requests. Apply them only for new projects, when the existing project
+already uses them, or when the user explicitly requests stricter JSON behavior. In order: no
+numbers read from JSON strings, exact property casing, duplicate property names rejected, null
+properties omitted from output.
 
 ```csharp
-// Apply these settings only for new projects, when the existing project already
-// uses them, or when the user explicitly requests stricter JSON behavior.
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
-    // disallow reading numbers from JSON strings
     options.SerializerOptions.NumberHandling = JsonNumberHandling.Strict;
-    // match properties with exact casing during deserialization
     options.SerializerOptions.PropertyNameCaseInsensitive = false;
-    // reject duplicate JSON property names during deserialization
     options.SerializerOptions.AllowDuplicateProperties = false;
-    // omit null properties from serialized output
     options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
 });
 ```
@@ -248,8 +245,9 @@ and forward it through to all async calls (service methods, EF Core queries,
 `HttpClient` calls). This allows the server to stop work when a client
 disconnects.
 
+Controller:
+
 ```csharp
-// Controller example
 [HttpGet("{id}")]
 public async Task<ActionResult<ProductResponse>> GetById(
     int id, CancellationToken cancellationToken)
@@ -257,8 +255,11 @@ public async Task<ActionResult<ProductResponse>> GetById(
     var product = await _productService.GetByIdAsync(id, cancellationToken);
     return product is null ? NotFound() : Ok(product);
 }
+```
 
-// Minimal API example — TypedResults with explicit return type (recommended)
+Minimal API, `TypedResults` with an explicit return type (recommended):
+
+```csharp
 app.MapGet("/api/products/{id}", async Task<Results<Ok<ProductResponse>, NotFound>> (
     int id, IProductService service, CancellationToken cancellationToken) =>
 {
@@ -302,14 +303,12 @@ app.MapGet("/api/products/{id}", handler)
 enums appear as readable strings in both API responses and OpenAPI schemas.
 Always add this configuration unless the user explicitly requests integer
 enum serialization. Configure it for both minimal APIs and controllers, as
-they use different option types:
+they use different option types. Minimal APIs, then controllers / MVC:
 
 ```csharp
-// Minimal APIs
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
-// Controllers / MVC
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
@@ -352,10 +351,8 @@ internal sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger)
         };
 
         if (statusCode == 0)
-            return false; // Let the default handler deal with it
+            return false;
 
-        // Important: returning true below suppresses the exception diagnostics middleware
-        // for this exception, so ensure it is logged/telemetrized before returning.
         logger.LogWarning(exception, "Handled API exception: {Title}", title);
 
         httpContext.Response.StatusCode = statusCode;
@@ -363,8 +360,6 @@ internal sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger)
         {
             Status = statusCode,
             Title = title,
-            // Do not use exception.Message here — it may leak sensitive internal details.
-            // Use a safe, user-facing message instead.
             Detail = title,
             Instance = httpContext.Request.Path
         }, cancellationToken);
@@ -373,6 +368,10 @@ internal sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger)
     }
 }
 ```
+
+`return false` hands unknown exceptions to the default handler. Returning `true` suppresses the
+exception diagnostics middleware for that exception, so log it before returning. `Detail` never
+carries `exception.Message`: it may leak internal details; use a safe, user-facing text.
 
 Register it:
 
@@ -394,28 +393,28 @@ Create a service interface and a sealed implementation class that owns the
 data access logic and mapping between entities and request/response types.
 
 Always define an interface for every service — this enables unit testing with
-mocks and follows the Dependency Inversion Principle:
+mocks and follows the Dependency Inversion Principle. `Services/IProductService.cs`:
 
 ```csharp
-// Services/IProductService.cs
 public interface IProductService
 {
     Task<IReadOnlyList<ProductResponse>> GetAllAsync(CancellationToken ct);
     Task<ProductResponse?> GetByIdAsync(int id, CancellationToken ct);
     Task<ProductResponse> CreateAsync(CreateProductRequest request, CancellationToken ct);
 }
+```
 
-// Services/ProductService.cs
-public sealed class ProductService(...) : IProductService
+`Services/ProductService.cs` holds the data access and the entity-to-DTO mapping:
+
+```csharp
+public sealed class ProductService(AppDbContext db) : IProductService
 {
-    // Data access logic, entity-to-DTO mapping
 }
 ```
 
-Register with the interface, not the concrete type:
+Register with the interface, not the concrete type, in `Program.cs`:
 
 ```csharp
-// In Program.cs
 builder.Services.AddScoped<IProductService, ProductService>();
 ```
 

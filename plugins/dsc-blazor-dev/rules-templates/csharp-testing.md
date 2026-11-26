@@ -9,6 +9,7 @@
 ## Structure
 
 - Given/When/Then naming or `MethodUnderTest_Scenario_ExpectedResult` — match whatever the project's existing test suite already uses
+- No `// Arrange` / `// Act` / `// Assert` (or Given/When/Then) comment labels, and no other comment (C# Code Style, *Comments* — hard rule, guard-enforced). Separate the three phases with a blank line; when setup needs explaining, extract a helper whose name says it (`GivenTenantWithExpiredLicense()`)
 - One assertion concern per test where practical; use `Assert.Multiple`/FluentAssertions grouping when checking several related properties of one result
 
 ## TDD Cycle (enforced by blazor-conductor)

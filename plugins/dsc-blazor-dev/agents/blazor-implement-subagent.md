@@ -81,8 +81,9 @@ Apply the always-on rules from `.claude/rules/` (or the copies the conductor pas
    `blazor-dev:skill-aot-serialization` before writing a custom `JsonConverter<T>` (a flat
    scalar wire-shape usually avoids it) and prove it with
    `dotnet publish <Client.csproj> -c Release -o <temp folder>`, not by inspection.
-6. **REFACTOR.** Naming, small methods, XML doc comments on public APIs; rebuild and re-run
-   your tests.
+6. **REFACTOR.** Naming, small methods, XML doc comments on public APIs — and no other comment
+   anywhere (rules, guard-enforced): what a comment would say goes into a name, an extracted
+   method or `<remarks>`. Rebuild and re-run your tests.
 7. **Return** the summary below. Do not re-read files already in context.
 
 A WP that genuinely cannot have tests (a pure SQL script, configuration only) says why under Tests.

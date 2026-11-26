@@ -30,8 +30,9 @@ You cannot optimize what you cannot see. Turn on command logging and read the SQ
 
 ```csharp
 optionsBuilder.LogTo(Console.WriteLine, LogLevel.Information);
-// or set "Microsoft.EntityFrameworkCore.Database.Command": "Information" in appsettings.json
 ```
+
+Or set `"Microsoft.EntityFrameworkCore.Database.Command": "Information"` in `appsettings.json`.
 
 Tag a query with `.TagWith("...")` to find it in the log. Count how many statements a slow operation runs, and how many rows each returns, before and after each change.
 
@@ -41,11 +42,15 @@ Tag a query with `.TagWith("...")` to find it in the log. Count how many stateme
 
 An index can only be used when the indexed column appears **bare** on one side of the comparison. Wrapping it in a function or arithmetic — `CreatedAt.Year == y`, `CreatedAt.Date == d`, `ToLower(Name) == n`, `Price * 1.1 > x`, or a leading-wildcard `LIKE '%foo'` — forces a per-row computation the index cannot satisfy, so the query **scans the whole table even though the index exists**. Adding another index changes nothing. Rewrite the predicate so the column stays bare, usually as a half-open range:
 
-```csharp
-// Non-sargable: a function is computed for every row → full scan
-db.Logs.Where(l => l.CreatedAt.Year == year);
+Non-sargable: a function is computed for every row → full scan
 
-// Sargable: bare column compared to constants → index seek
+```csharp
+db.Logs.Where(l => l.CreatedAt.Year == year);
+```
+
+Sargable: bare column compared to constants → index seek
+
+```csharp
 var start = new DateTime(year, 1, 1);
 db.Logs.Where(l => l.CreatedAt >= start && l.CreatedAt < start.AddYears(1));
 ```
@@ -117,11 +122,12 @@ Order by a unique, stable, indexed key (add tie-breakers if the sort column isn'
 
 Moving a filter into SQL or making a predicate sargable stops the *client-side* waste, but a `WHERE` or `ORDER BY` on a column with no index still scans the whole table inside the database — and a frequently-run query then re-scans it on every call. So audit index coverage separately from the query rewrite: for each query, check whether its filter and sort columns are backed by an index. Entity keys and foreign keys are indexed by convention, but other columns — status flags, state/enum fields, timestamps, names — usually are **not** unless the model configures it. When a hot query filters or sorts on such an unindexed column, recommend adding an index and say so explicitly, even when the rewritten query already returns the right rows: the index is a separate fix the code change alone doesn't deliver. (If the predicate isn't sargable, fix that first — a new index can't help a scan caused by a function on the column.)
 
-If EF Core owns the schema, add the index in the model and migrate:
+If EF Core owns the schema, add the index in the model and migrate, equality column first, then
+the range/sort column:
 
 ```csharp
 modelBuilder.Entity<Order>()
-    .HasIndex(o => new { o.CustomerId, o.CreatedAt }); // equality column first, then range/sort
+    .HasIndex(o => new { o.CustomerId, o.CreatedAt });
 ```
 
 Then create the migration with `dotnet ef migrations add ...`. **Do not apply it** with `dotnet ef database update` (or any equivalent that writes to the database) without explicit user approval — applying a migration mutates the database, so add the migration, show it to the user, and let them run the update once they've reviewed it. If EF Core does not own the schema, recommend the same index to whoever manages the database. Don't over-index — every index slows writes.

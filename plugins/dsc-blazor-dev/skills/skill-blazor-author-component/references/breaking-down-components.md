@@ -4,8 +4,9 @@
 
 When a component has two independent blocks (no shared state/handlers), extract each as a sibling.
 
+`CardTitle.razor`:
+
 ```razor
-<!-- CardTitle.razor -->
 <div class="card-header">
     <h3>@Title</h3>
     <button @onclick="OnPin">Pin</button>
@@ -16,8 +17,9 @@ When a component has two independent blocks (no shared state/handlers), extract 
 }
 ```
 
+`CardBody.razor`:
+
 ```razor
-<!-- CardBody.razor -->
 <div class="card-body">
     <p>@Description</p>
     <button @onclick="OnExpand">Read more</button>
@@ -28,8 +30,9 @@ When a component has two independent blocks (no shared state/handlers), extract 
 }
 ```
 
+`Card.razor` composes its siblings:
+
 ```razor
-<!-- Card.razor — composes siblings -->
 <div class="card">
     <CardTitle Title="@Title" OnPin="OnPin" />
     <CardBody Description="@Description" OnExpand="OnExpand" />
@@ -40,8 +43,9 @@ When a component has two independent blocks (no shared state/handlers), extract 
 
 Extract complex item templates into their own component. Use `@key` for efficient diffing.
 
+`TaskItem.razor`:
+
 ```razor
-<!-- TaskItem.razor -->
 <li class="task-item @(Task.IsComplete ? "done" : "")">
     <input type="checkbox" checked="@Task.IsComplete"
            @onchange="() => OnToggle.InvokeAsync(Task)" />
@@ -55,8 +59,9 @@ Extract complex item templates into their own component. Use `@key` for efficien
 }
 ```
 
+`TaskList.razor`:
+
 ```razor
-<!-- TaskList.razor -->
 <ul class="task-list">
     @foreach (var task in Tasks)
     {
@@ -70,8 +75,9 @@ Extract complex item templates into their own component. Use `@key` for efficien
 
 Avoid parameter drilling through intermediate components. Cascade a context object or cascade the parent itself.
 
+`TabSet.razor` cascades itself:
+
 ```razor
-<!-- TabSet.razor — cascades itself -->
 <CascadingValue Value="this" IsFixed="true">
     <ul class="nav nav-tabs">@ChildContent</ul>
 </CascadingValue>
@@ -89,8 +95,9 @@ Avoid parameter drilling through intermediate components. Cascade a context obje
 }
 ```
 
+`Tab.razor` receives its parent via a cascading parameter:
+
 ```razor
-<!-- Tab.razor — receives parent via cascading parameter -->
 @implements ITab
 <li>
     <a @onclick="() => ContainerTabSet?.SetActiveTab(this)"

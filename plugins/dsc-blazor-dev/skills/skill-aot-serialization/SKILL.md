@@ -19,31 +19,33 @@ Before writing a `JsonConverter<T>`, check whether the *problem type* can be pai
 flat wire-shape record made only of scalar members (`string`, `int`, `decimal`, `DateOnly`, `bool`,
 etc.) that System.Text.Json already knows how to handle with zero custom code:
 
+❌ First instinct: hand-roll a converter with manual `Utf8JsonReader`/`Writer` token walking. It
+works, but is easy to get subtly wrong (see the STJ gotcha below) and is a maintenance burden.
+
 ```csharp
-// ❌ First instinct: hand-roll a converter with manual Utf8JsonReader/Writer token walking —
-// works, but is easy to get subtly wrong (see the STJ gotcha below) and is a maintenance burden.
 public sealed class ExchangeRatesJsonConverter
     : JsonConverter<IReadOnlyDictionary<(DateOnly Date, string CurrencyCode), decimal>>
 {
     public override IReadOnlyDictionary<(DateOnly, string), decimal> Read(
         ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
-        // manual StartArray/StartObject/property-name switch walking...
+        return ReadTokenByToken(ref reader);
     }
-    // ...
 }
+```
 
-// ✅ Reshape instead: a flat record STJ serializes natively, no converter at all.
+✅ Reshape instead: a flat record STJ serializes natively, no converter at all. The rich shape
+the rule consumers want stays, `[JsonIgnore]`d; the wire shape is a plain `List<T>` of scalars.
+
+```csharp
 public sealed record ExchangeRateEntry(DateOnly Date, string CurrencyCode, decimal Rate);
 
 public sealed class ValidationContext
 {
-    // The rich shape rule consumers actually want — kept for them, [JsonIgnore]'d for wire purposes.
     [JsonIgnore]
     public IReadOnlyDictionary<(DateOnly Date, string CurrencyCode), decimal> ExchangeRates { get; set; }
         = new Dictionary<(DateOnly, string), decimal>();
 
-    // The actual wire shape — a plain List<T> of scalars, zero custom serialization code.
     [JsonInclude]
     [JsonPropertyName("ExchangeRates")]
     public List<ExchangeRateEntry> ExchangeRatesEntries
@@ -67,10 +69,10 @@ parameterized-constructor-style deserialization — and then throws
 
 ```csharp
 [JsonIgnore]
-public Dictionary<string, object> ComputedFields { get; set; } = new();   // set, not init
+public Dictionary<string, object> ComputedFields { get; set; } = new();
 
 [JsonInclude]
-public List<ComputedFieldEntry> ComputedFieldsEntries { get; init; } = [];  // init is fine here
+public List<ComputedFieldEntry> ComputedFieldsEntries { get; init; } = [];
 ```
 
 Verify any non-obvious claim about a serialization library's behavior (STJ's own edge cases included)

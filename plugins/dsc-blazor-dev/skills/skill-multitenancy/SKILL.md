@@ -38,29 +38,39 @@ or equivalent) — the rest of this checklist branches on that:
 
 ## Anti-Patterns to Flag
 
+❌ Tenant inferred from ambient/ThreadStatic state — fragile under async, easy to get wrong.
+
 ```csharp
-// ❌ Tenant inferred from ambient/ThreadStatic state — fragile under async, easy to get wrong
 private static Guid CurrentTenant;
+```
 
-// ❌ Cache keyed only by entity ID, not tenant — leaks across tenants
+❌ Cache keyed only by entity ID, not tenant — leaks across tenants.
+
+```csharp
 private static readonly Dictionary<int, Employee> _cache = new();
+```
 
-// ✅ Explicit tenant parameter, cache (if any) keyed by (tenant, entity)
+✅ Explicit tenant parameter, cache (if any) keyed by (tenant, entity).
+
+```csharp
 public async Task<ServiceResponse<Employee>> GetEmployeeAsync(Guid tenantId, int employeeId)
+```
 
-// ❌ Redundant TenantId column on a table that already lives in a per-tenant database — the
-// connection itself is the tenant boundary; a TenantId column here is dead weight at best and,
-// once someone starts filtering by it "for safety", a source of silent bugs at worst (e.g. a
-// caller passing the wrong tenant id alongside the right connection). This exact mistake has
-// shipped twice in DynaHR (an Outbox table, then a Draft table) before being caught in review —
-// don't repeat it. The real per-row discriminator inside a tenant's own database is CompanyId.
+❌ Redundant `TenantId` column on a table that already lives in a per-tenant database. The
+connection itself is the tenant boundary; a `TenantId` column here is dead weight at best and,
+once someone starts filtering by it "for safety", a source of silent bugs at worst (e.g. a caller
+passing the wrong tenant id alongside the right connection). This exact mistake has shipped twice
+in DynaHR (an Outbox table, then a Draft table) before being caught in review — don't repeat it.
+
+```sql
 CREATE TABLE dbo.SomeTable (
     Id UNIQUEIDENTIFIER PRIMARY KEY,
-    TenantId UNIQUEIDENTIFIER NOT NULL,  -- ❌ redundant in a per-tenant-database project
-    CompanyId UNIQUEIDENTIFIER NOT NULL, -- ✅ this is the real scoping column here
-    ...
+    TenantId UNIQUEIDENTIFIER NOT NULL,
+    CompanyId UNIQUEIDENTIFIER NOT NULL
 );
 ```
+
+✅ The real per-row discriminator inside a tenant's own database is `CompanyId`: drop `TenantId`.
 
 ## Cross-References
 

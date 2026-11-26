@@ -16,16 +16,17 @@ decision() {
 }
 
 decision ALLOW "doc comment typo"    a Edit "    /// <summary>Custmer</summary>" "    /// <summary>Customer</summary>"
-decision ALLOW "comment typo"        a Edit "// tpyo" "// typo"
-decision ALLOW "second comment"      a Edit "// one" "// two"
-decision DENY  "4th edit (budget 3)" a Edit "// a" "// b"
+decision ALLOW "comment typo"        a Edit "/// tpyo" "/// typo"
+decision ALLOW "second comment"      a Edit "/// one" "/// two"
+decision DENY  "4th edit (budget 3)" a Edit "/// a" "/// b"
 decision DENY  "logic change"        b Edit "await repo.DeleteAsync(id);" "await repo.UpdateAsync(id);"
-decision DENY  "code smuggled after comment" b Edit "// a" "// b\\nrepo.Delete();"
-decision DENY  "multi-line old"      b Edit "// a\\n// b" "// c"
-decision DENY  "replace_all"         b Edit "// a" "// b" ',"replace_all":true'
+decision DENY  "plain // comment (not doc)" b Edit "// tpyo" "// typo"
+decision DENY  "code smuggled after comment" b Edit "/// a" "/// b\\nrepo.Delete();"
+decision DENY  "multi-line old"      b Edit "/// a\\n/// b" "/// c"
+decision DENY  "replace_all"         b Edit "/// a" "/// b" ',"replace_all":true'
 decision DENY  "string literal"      b Edit "Title = \\\"a\\\";" "Title = \\\"b\\\";"
-decision DENY  "Write tool"          b Write "// a" "// b"
-decision DENY  "no session id"       "" Edit "// a" "// b"
+decision DENY  "Write tool"          b Write "/// a" "/// b"
+decision DENY  "no session id"       "" Edit "/// a" "/// b"
 decision DENY  "non-text property"   b Edit "Dense = true;" "Dense = false;"
 
 out="$(printf '{"session_id":"c","agent_type":"blazor-dev:blazor-developer","tool_name":"Write","tool_input":{"file_path":"/a/Svc.cs"}}' | bash "$H")"

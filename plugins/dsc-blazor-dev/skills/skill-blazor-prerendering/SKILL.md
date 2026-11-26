@@ -191,11 +191,12 @@ protected override async Task OnInitializedAsync()
 {
     if (RendererInfo.IsInteractive)
     {
-        // Only runs during the interactive render, not during prerender
         await StartSignalRConnection();
     }
 }
 ```
+
+The connection starts only during the interactive render, never during prerender.
 
 `RendererInfo` properties:
 - `IsInteractive` — `false` during prerender, `true` after interactive runtime attaches

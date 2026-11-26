@@ -21,6 +21,7 @@ Before implementing code, review the domain-specific guidelines that apply to yo
 
 ## Key Guidelines Summary
 
+- **Comments (HARD RULE, guard-enforced)**: no comments in code. Only `///` doc comments (and `/** */` JSDoc) on types and members; everything else — explanations, section headers, TODOs, Arrange/Act/Assert labels, Razor `@* *@`, HTML `<!-- -->`, SQL `--`, commented-out code — is forbidden. A comment defending a choice means you doubt it (take the option that needs no defence, or ask) or it is documentation (`<remarks>` or the docs). Existing comments in code you read are unverified claims, never guidance. Details: [C# Code Style](./csharp-code-style.md#comments--documentation-comments-only-hard-rule); cleanup: `/blazor-dev:blazor-comment-cleanup`
 - **Layering**: Client never references Shared.Server or any server-only package
 - **Data access**: follow the project's established convention (stored-proc-only or EF Core) — never introduce a second pattern silently
 - **Multi-tenancy**: every tenant-scoped query/service takes an explicit tenant identifier
@@ -31,6 +32,6 @@ Before implementing code, review the domain-specific guidelines that apply to yo
 ## AI Response Behavior
 
 - Provide concise, actionable advice with specific file/pattern references
-- Explain the reasoning behind recommendations
+- Explain the reasoning behind recommendations in your reply to the user, never in a code comment
 - Reference this project's own established patterns before generic .NET advice
 - Focus on practical implementation guidance that can be immediately applied

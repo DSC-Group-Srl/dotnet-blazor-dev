@@ -52,7 +52,7 @@ Check `AGENTS.md` for **Interactivity Mode** and **Interactivity Scope**. This d
 
     private async Task HandleSubmit()
     {
-        // Save Employee
+        await EmployeeService.SaveAsync(Employee!);
     }
 }
 ```
@@ -204,7 +204,7 @@ Usage in a form:
     <DataAnnotationsValidator />
     <CustomValidator @ref="customValidator" />
     <ValidationSummary />
-    @* inputs *@
+    <InputText @bind-Value="Model!.Email" />
 </EditForm>
 
 @code {
@@ -218,7 +218,8 @@ Usage in a form:
             customValidator!.DisplayErrors(errors);
             return;
         }
-        // proceed
+
+        await RegistrationService.RegisterAsync(Model!);
     }
 }
 ```
@@ -235,7 +236,6 @@ Run logic after a bound value changes:
 @code {
     private async Task OnZipCodeChanged()
     {
-        // Fetch city/state based on new zip code
         var location = await LocationService.LookupAsync(Model!.ZipCode);
         Model.City = location?.City;
         Model.State = location?.State;
@@ -335,9 +335,8 @@ When using raw `<form>` instead of `EditForm` in SSR, add the antiforgery token 
     {
         selectedFile = e.File;
 
-        // Read stream with size limit
         await using var stream = selectedFile.OpenReadStream(maxAllowedSize: 10 * 1024 * 1024);
-        // Process stream — save to disk, upload to storage, etc.
+        await FileStorage.SaveAsync(selectedFile.Name, stream);
     }
 }
 ```
@@ -357,7 +356,7 @@ For multiple files:
         foreach (var file in e.GetMultipleFiles(maxAllowedFiles: 10))
         {
             await using var stream = file.OpenReadStream(maxAllowedSize: 10 * 1024 * 1024);
-            // Process each file
+            await FileStorage.SaveAsync(file.Name, stream);
         }
     }
 }

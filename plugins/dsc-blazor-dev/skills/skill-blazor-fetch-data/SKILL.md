@@ -24,14 +24,18 @@ Check **Interactivity Mode** and **Scope**:
 
 Only needed when calling external APIs from Server, or always for WebAssembly/Auto. Server components accessing their own database should inject `DbContext` or a service directly.
 
+Named client (requires the `Microsoft.Extensions.Http` NuGet package):
+
 ```csharp
-// Named client — requires Microsoft.Extensions.Http NuGet
 builder.Services.AddHttpClient("CatalogAPI", client =>
 {
     client.BaseAddress = new Uri("https://api.example.com/");
 });
+```
 
-// Typed client
+Typed client:
+
+```csharp
 builder.Services.AddHttpClient<CatalogClient>(client =>
     client.BaseAddress = new Uri("https://api.example.com/"));
 ```
@@ -121,10 +125,10 @@ Non-cancellation exceptions (`HttpRequestException`, etc.) propagate to `ErrorBo
 
 ### When to add in-component error handling
 
-Only add catch blocks when the component needs behavior `ErrorBoundary` can't provide — typically **retries** or **timeout-specific messages**. Even then, only catch what you need:
+Only add catch blocks when the component needs behavior `ErrorBoundary` can't provide — typically **retries** or **timeout-specific messages**. Even then, only catch what you need: here only external cancellation (timeouts); everything
+else flows to `ErrorBoundary`.
 
 ```csharp
-// Catch only external cancellation (timeouts) — everything else flows to ErrorBoundary
 catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
 {
     Logger.LogWarning(ex, "Request timed out for category {CategoryId}", CategoryId);
@@ -190,7 +194,7 @@ else
 
 @code {
     [Parameter] public int CategoryId { get; set; }
-    [SupplyParameterFromQuery] public string? ViewMode { get; set; } // UI-only
+    [SupplyParameterFromQuery] public string? ViewMode { get; set; }
 
     private CancellationTokenSource? cts;
     private int? loadedCategoryId;
@@ -202,7 +206,7 @@ else
     {
         if (CategoryId == loadedCategoryId)
         {
-            return; // Only ViewMode changed — no reload
+            return;
         }
 
         loadedCategoryId = CategoryId;
@@ -218,7 +222,7 @@ else
         }
 
         cts = new CancellationTokenSource();
-        var cancellationToken = cts.Token; // Capture locally before await
+        var cancellationToken = cts.Token;
 
         error = null;
         isLoading = true;
@@ -250,6 +254,8 @@ else
 }
 ```
 
+`ViewMode` is UI-only: when only it changes, `OnParametersSetAsync` returns without reloading. The token is captured in a local before the first `await`, because `cts` may be replaced by a newer load meanwhile.
+
 Key details:
 - **Guard with tracked value**: `loadedCategoryId` skips reloads when only UI parameters change.
 - **Capture the token locally** before the await — the CTS field may be replaced by a concurrent parameter change.
@@ -280,15 +286,21 @@ public abstract class ProductServiceBase
 {
     public abstract Task<Product[]> GetAllAsync(CancellationToken ct = default);
 }
+```
 
-// Server — direct database access
+Server, direct database access:
+
+```csharp
 public class ServerProductService(AppDbContext db) : ProductServiceBase
 {
     public override async Task<Product[]> GetAllAsync(CancellationToken ct = default) =>
         await db.Products.ToArrayAsync(ct);
 }
+```
 
-// Client — calls API
+Client, calls the API:
+
+```csharp
 public class ClientProductService(HttpClient http) : ProductServiceBase
 {
     public override async Task<Product[]> GetAllAsync(CancellationToken ct = default) =>

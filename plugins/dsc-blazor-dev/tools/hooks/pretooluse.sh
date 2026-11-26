@@ -18,6 +18,8 @@
 #                                pull request someone else opened),
 #                                then tools/read-guard/pretooluse_hook.sh
 #        Write|Edit           -> tools/conductor-guard/pretooluse_hook.sh,
+#                                then tools/comment-guard/pretooluse_hook.sh (no comments in
+#                                code except documentation comments),
 #                                then tools/main-thread-guard/pretooluse_hook.sh
 #      any other tool         -> exit 0, silent.
 #
@@ -48,7 +50,7 @@ tool="$(printf '%s' "$INPUT" | grep -oE '"tool_name"[[:space:]]*:[[:space:]]*"[^
 case "$tool" in
   Read)                 guards=("read-guard/pretooluse_hook.sh") ;;
   Bash|PowerShell)      guards=("git/merge_guard.sh" "read-guard/pretooluse_hook.sh") ;;
-  Write|Edit)           guards=("conductor-guard/pretooluse_hook.sh" "main-thread-guard/pretooluse_hook.sh") ;;
+  Write|Edit)           guards=("conductor-guard/pretooluse_hook.sh" "comment-guard/pretooluse_hook.sh" "main-thread-guard/pretooluse_hook.sh") ;;
   *)                    exit 0 ;;
 esac
 

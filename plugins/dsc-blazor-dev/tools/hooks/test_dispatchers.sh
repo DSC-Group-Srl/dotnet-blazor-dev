@@ -79,7 +79,8 @@ pre "main-thread-guard deny (main thread writes .razor)" DENY \
   '{"session_id":"s2","tool_name":"Write","tool_input":{"file_path":"C:\\app\\src\\Pages\\A.razor","content":"x"}}' \
   "blazor-dev routing"
 pre "main-thread-guard fast path stays silent" SILENT \
-  '{"session_id":"s3","tool_name":"Edit","tool_input":{"file_path":"/a/b.cs","old_string":"// tpyo","new_string":"// typo"}}'
+  '{"session_id":"s3","tool_name":"Edit","tool_input":{"file_path":"/a/b.cs","old_string":"/// tpyo","new_string":"/// typo"}}'
+pre "comment-guard deny (subagent adds a comment to .cs)" DENY   '{"session_id":"s9","agent_type":"blazor-dev:blazor-developer","agent_id":"z","tool_name":"Edit","tool_input":{"file_path":"/a/b.cs","old_string":"x = 1;","new_string":"// set x\nx = 1;"}}'   "no comments in code"
 pre "subagent Edit of .cs is allowed" SILENT \
   '{"session_id":"s4","agent_type":"blazor-dev:blazor-developer","agent_id":"y","tool_name":"Edit","tool_input":{"file_path":"/a/b.cs","old_string":"a","new_string":"b"}}'
 pre "main thread Write of .md is allowed" SILENT \

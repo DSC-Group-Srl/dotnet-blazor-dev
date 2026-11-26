@@ -17,8 +17,9 @@ DynaHR wraps raw MudBlazor components in its own `DSC.Blazor.MudBlazor` library 
 
 ## Pattern
 
+`DSC.Blazor.MudBlazor/DscTextField.razor` wraps `MudTextField` with the project defaults:
+
 ```csharp
-// DSC.Blazor.MudBlazor/DscTextField.razor — wraps MudTextField with project defaults
 <MudTextField @bind-Value="Value"
               Variant="Variant.Outlined"
               Immediate="true"

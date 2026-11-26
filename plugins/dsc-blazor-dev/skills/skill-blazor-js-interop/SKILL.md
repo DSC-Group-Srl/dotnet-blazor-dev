@@ -20,11 +20,12 @@ description: >
 
 Always use collocated `.razor.js` files with `export` — never global `window.*` functions or `<script>` tags.
 
+`ChartPanel.razor.js`, placed next to `ChartPanel.razor`:
+
 ```javascript
-// ChartPanel.razor.js — placed next to ChartPanel.razor
-export function initialize(canvas, dotNetRef) { /* ... */ }
-export function updateData(points) { /* ... */ }
-export function dispose() { /* ... */ }
+export function initialize(canvas, dotNetRef) { }
+export function updateData(points) { }
+export function dispose() { }
 ```
 
 Import paths: same project = `"./Components/ChartPanel.razor.js"`, RCL = `"./_content/{AssemblyName}/..."`.
@@ -57,7 +58,7 @@ protected override void OnParametersSet() => _dataChanged = true;
 
 protected override async Task OnAfterRenderAsync(bool firstRender)
 {
-    if (firstRender) { /* init */ }
+    if (firstRender) { await InitializeChartAsync(); }
     else if (_dataChanged && _chart is not null)
     {
         _dataChanged = false;
@@ -74,24 +75,32 @@ Each JS interop call crosses the .NET-to-JS boundary (and in Blazor Server, the 
 
 If the C# side makes two or more JS calls in a row, combine them into one JS function:
 
+❌ Two round-trips — theme and locale are always applied together.
+
 ```csharp
-// ❌ Two round-trips — theme and locale are always applied together
 await _module.InvokeVoidAsync("applyTheme", theme);
 await _module.InvokeVoidAsync("applyLocale", locale);
+```
 
-// ❌ Result of one call feeds into another — both can stay in JS
+❌ Result of one call feeds into another — both can stay in JS.
+
+```csharp
 var token = await _module.InvokeAsync<string>("createAccessToken");
 await _module.InvokeVoidAsync("storeToken", token);
 ```
 
+✅ One call applies both — no data dependency, no reason for two trips.
+
 ```javascript
-// ✅ One call applies both — no data dependency, no reason for two trips
 export function applyPreferences(theme, locale) {
     document.documentElement.dataset.theme = theme;
     document.documentElement.lang = locale;
 }
+```
 
-// ✅ Chain stays in JS — the token never needs to cross the boundary
+✅ Chain stays in JS — the token never needs to cross the boundary.
+
+```javascript
 export function createAndStoreToken() {
     const token = crypto.randomUUID();
     sessionStorage.setItem('access-token', token);
@@ -103,12 +112,16 @@ export function createAndStoreToken() {
 
 When JS needs to send multiple pieces of data back to .NET, send them in a single `invokeMethodAsync` call rather than making separate callbacks:
 
+❌ Two .NET round-trips from JS.
+
 ```javascript
-// ❌ Two .NET round-trips from JS
 await dotNetRef.invokeMethodAsync(ON_VOLUME_CHANGED, volume);
 await dotNetRef.invokeMethodAsync(ON_PLAYBACK_CHANGED, isPlaying);
+```
 
-// ✅ One callback with all data
+✅ One callback with all data.
+
+```javascript
 await dotNetRef.invokeMethodAsync(ON_PLAYER_STATE_CHANGED, { volume, isPlaying });
 ```
 
@@ -218,7 +231,7 @@ class ClipboardMonitor {
             try {
                 const text = await navigator.clipboard.readText();
                 await this.#dotNetRef.invokeMethodAsync(ON_CLIPBOARD_CHANGED, text);
-            } catch { /* circuit disconnected or clipboard denied */ }
+            } catch { }
         }, { signal: this.#abortController.signal });
     }
 
@@ -237,6 +250,8 @@ export function dispose() {
     monitor?.dispose();
 }
 ```
+
+The empty `catch` covers a disconnected circuit or a denied clipboard: both are expected and need no handling.
 
 Rules:
 - `[JSInvokable]` methods **must be `public`** — private/internal silently fails at runtime

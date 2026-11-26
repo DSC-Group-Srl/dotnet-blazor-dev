@@ -4,6 +4,10 @@
 
 Prefer components from the project's own wrapper library (e.g. `DSC.Blazor.MudBlazor`) over consuming a raw third-party library (MudBlazor, etc.) directly in feature code — a wrapper keeps theming and cross-cutting behavior (validation display, loading states) in one place.
 
+## No Markup Comments
+
+Razor `@* *@` and HTML `<!-- -->` comments are forbidden like any other comment (C# Code Style, *Comments* — hard rule, guard-enforced). A section of markup that needs a label becomes a child component whose name is the label; commented-out markup is deleted.
+
 ## Render Modes
 
 Be explicit about render mode per component (`InteractiveServer`, `InteractiveWebAssembly`, `InteractiveAuto`, or static SSR) rather than leaving it to a default — it determines where the component's code actually executes and what it can safely reference.

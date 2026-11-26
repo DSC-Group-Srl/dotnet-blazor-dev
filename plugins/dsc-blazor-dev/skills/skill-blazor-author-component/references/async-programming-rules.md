@@ -6,14 +6,18 @@ Blazor's sync context guarantees single-threaded component execution. All rules 
 
 `await` every `Task` by default — discarded tasks silently lose exceptions. The only exception: fire-and-forget where the called method wraps its body in `try/catch` and routes errors via `DispatchExceptionAsync` (see Fire-and-Forget section below).
 
+Do:
+
 ```csharp
-// DO
 private async Task LoadData()
 {
     items = await Http.GetFromJsonAsync<List<Item>>("api/items");
 }
+```
 
-// DON'T — fire-and-forget hides exceptions
+Don't: fire-and-forget hides exceptions.
+
+```csharp
 private void LoadData()
 {
     _ = Http.GetFromJsonAsync<List<Item>>("api/items");
@@ -32,14 +36,18 @@ These deadlock or escape the sync context. Never use in components:
 | `Task.ContinueWith` | Continuation runs outside sync context |
 | `Channel<T>`, `BlockingCollection<T>`, concurrent collections | Unnecessary — single-threaded access guaranteed |
 
+Don't: `Task.Run` escapes the sync context, and `StateHasChanged` then throws `InvalidOperationException`.
+
 ```csharp
-// DON'T — Task.Run escapes sync context
 _ = Task.Run(async () => {
     var result = await OrderService.SubmitAsync(order);
-    StateHasChanged(); // InvalidOperationException!
+    StateHasChanged();
 });
+```
 
-// DO — stay on sync context
+Do: stay on sync context.
+
+```csharp
 private async Task ProcessOrder()
 {
     var result = await OrderService.SubmitAsync(order);
@@ -60,7 +68,7 @@ private async Task ProcessSteps()
     status = "Step 1...";
     await Step1Async();
     status = "Step 2...";
-    StateHasChanged(); // intermediate update
+    StateHasChanged();
     await Step2Async();
 }
 ```
@@ -100,8 +108,9 @@ private async Task SendReportCore()
 
 **Instead of `Task.Run`** — use `await` directly or `Task.Yield`:
 
+`Task.Yield` lets the renderer paint, then continues on the sync context:
+
 ```csharp
-// Yield to let renderer paint, then continue on sync context
 private async Task StartLongOperation()
 {
     status = "Starting...";
@@ -145,14 +154,18 @@ private async Task RunLongQuery()
 
 ### Instead of `.Result` / `.Wait()` — use `await`
 
+Wrong: blocks the sync context, deadlocks the circuit.
+
 ```csharp
-// Wrong — blocks the sync context, deadlocks the circuit
 private void Load()
 {
     var data = Http.GetFromJsonAsync<List<Item>>("api/items").Result;
 }
+```
 
-// Correct — use async all the way through
+Correct: use async all the way through.
+
+```csharp
 private async Task Load()
 {
     var data = await Http.GetFromJsonAsync<List<Item>>("api/items");
@@ -187,29 +200,37 @@ private async Task LoadAsync()
 
 Because the synchronization context guarantees single-threaded access within a circuit, regular `Dictionary<K,V>`, `List<T>`, and `Queue<T>` are safe. Concurrent collections add overhead with no benefit:
 
-```csharp
-// Wrong — unnecessary overhead, hides the threading model
-private readonly ConcurrentDictionary<string, int> cache = new();
+Wrong: unnecessary overhead, hides the threading model.
 
-// Correct — the sync context already prevents concurrent access
+```csharp
+private readonly ConcurrentDictionary<string, int> cache = new();
+```
+
+Correct: the sync context already prevents concurrent access.
+
+```csharp
 private readonly Dictionary<string, int> cache = [];
 ```
 
 ### Instead of `Task.ContinueWith` — use `await` with code after it
 
+Wrong: the continuation may run on a thread-pool thread, and `StateHasChanged` then throws `InvalidOperationException`.
+
 ```csharp
-// Wrong — continuation may run on a thread-pool thread
 private void Start()
 {
     _ = Http.GetFromJsonAsync<List<Item>>("api/items")
         .ContinueWith(t =>
         {
             items = t.Result;
-            StateHasChanged(); // InvalidOperationException!
+            StateHasChanged();
         });
 }
+```
 
-// Correct — straightforward async/await
+Correct: straightforward async/await.
+
+```csharp
 private async Task Start()
 {
     items = await Http.GetFromJsonAsync<List<Item>>("api/items");
@@ -240,9 +261,8 @@ Use a `CancellationTokenSource` that is cancelled in `DisposeAsync`:
                 "api/items", cts.Token);
             status = $"Loaded {data?.Count} items.";
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
         {
-            // Component was disposed while loading — expected, nothing to do.
         }
     }
 

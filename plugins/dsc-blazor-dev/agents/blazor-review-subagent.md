@@ -46,6 +46,10 @@ at the same time; never build, test or publish there.
 
 - **Conventions**: naming, project layout, central package management (`Directory.Packages.props`
   only), nullable reference type usage
+- **Comments (hard rule)**: run `python "${CLAUDE_PLUGIN_ROOT}/tools/comment-guard/comment_guard.py" scan <changed files>`:
+  every hit (a `//`, `/* */`, `@* *@`, `<!-- -->` or SQL `--` that is not a `///` or `/** */` doc
+  comment — explanations, section headers, TODOs, Arrange/Act/Assert labels, commented-out code)
+  is MAJOR (NEEDS_REVISION), not a nitpick. A comment that defends a choice → also judge the choice itself
 - **Test coverage**: real tests per WP (xUnit for services/logic, bUnit for component behavior)
   that actually exercise the new code path; every acceptance criterion has a test
 - **Tenant isolation** (data access changed): every query scoped by tenant identifier, no

@@ -24,8 +24,9 @@ Read `AGENTS.md` at the workspace root for the project's interactivity mode and 
 
 ## Step 2 — Register auth services in Program.cs
 
+`Program.cs` (server project):
+
 ```csharp
-// Program.cs (server project)
 builder.Services.AddCascadingAuthenticationState();
 builder.Services.AddAuthorization();
 ```
@@ -69,10 +70,12 @@ The `App.razor` component must use `AuthorizeRouteView` and conditionally apply 
 
     private IComponentRenderMode? RenderModeForPage =>
         HttpContext.AcceptsInteractiveRouting()
-            ? InteractiveServer   // replace with the app's render mode
+            ? InteractiveServer
             : null;
 }
 ```
+
+Use the app's own render mode in place of `InteractiveServer`.
 
 In `Routes.razor` (or wherever the router lives), use `AuthorizeRouteView`:
 

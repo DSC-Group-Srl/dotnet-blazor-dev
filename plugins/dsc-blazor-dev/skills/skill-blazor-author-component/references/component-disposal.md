@@ -46,7 +46,7 @@ Implement when component owns: event subscriptions, timers, `CancellationTokenSo
         if (module is not null)
         {
             try { await module.DisposeAsync(); }
-            catch (JSDisconnectedException) { } // Circuit already gone
+            catch (JSDisconnectedException) { }
         }
     }
 }

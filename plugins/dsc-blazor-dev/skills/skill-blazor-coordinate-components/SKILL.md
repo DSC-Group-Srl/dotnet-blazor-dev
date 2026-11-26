@@ -50,8 +50,9 @@ For persisting state across prerender→interactive: see `support-prerendering` 
 
 Wrap a subtree with `<CascadingValue>` to flow data to all descendants without passing it through every intermediate component.
 
+In a layout or parent component:
+
 ```razor
-@* In a layout or parent component *@
 <CascadingValue Value="theme">
     @Body
 </CascadingValue>
@@ -84,8 +85,9 @@ private ThemeInfo? Theme { get; set; }
 
 Register a `CascadingValueSource<T>` in DI when the value must be available to **all components regardless of render mode**.
 
+`Program.cs`:
+
 ```csharp
-// Program.cs
 builder.Services.AddCascadingValue(sp =>
 {
     var theme = new ThemeInfo { ButtonClass = "btn-primary" };
@@ -102,8 +104,9 @@ private ThemeInfo? Theme { get; set; }
 
 **To update and notify subscribers**, either mutate the existing object or replace it:
 
+A component that changes the theme:
+
 ```razor
-@* Component that changes the theme *@
 @inject CascadingValueSource<ThemeInfo> ThemeSource
 
 <button @onclick="ToggleDarkMode">Toggle theme</button>
@@ -114,12 +117,13 @@ private ThemeInfo? Theme { get; set; }
     private async Task ToggleDarkMode()
     {
         isDark = !isDark;
-        // Replace the value entirely:
         var newTheme = new ThemeInfo { ButtonClass = isDark ? "btn-dark" : "btn-primary" };
         await ThemeSource.NotifyChangedAsync(newTheme);
     }
 }
 ```
+
+The new value replaces the old one entirely: a fresh `ThemeInfo`, never a mutated instance.
 
 `NotifyChangedAsync()` (no argument) also works — mutate the object and then call it. `NotifyChangedAsync(newValue)` replaces the value and notifies in one step.
 

@@ -168,11 +168,10 @@ The template generates the correct `Program.cs` for the chosen mode. Verify thes
 
 ### Static SSR Only
 
-```csharp
-// Program.cs
-builder.Services.AddRazorComponents();
+`Program.cs`:
 
-// ...
+```csharp
+builder.Services.AddRazorComponents();
 
 app.MapRazorComponents<App>();
 ```
@@ -183,31 +182,30 @@ app.MapRazorComponents<App>();
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
-// ...
-
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 ```
 
 ### WebAssembly (per-page or global)
 
+Server `Program.cs`:
+
 ```csharp
-// Server Program.cs
 builder.Services.AddRazorComponents()
     .AddInteractiveWebAssemblyComponents();
-
-// ...
 
 app.MapRazorComponents<App>()
     .AddInteractiveWebAssemblyRenderMode()
     .AddAdditionalAssemblies(typeof({AppName}.Client._Imports).Assembly);
 ```
 
+Client `Program.cs`:
+
 ```csharp
-// Client Program.cs
 builder.Services.AddAuthorizationCore();
-// Register HttpClient, other client-side services
 ```
+
+Register `HttpClient` and the other client-side services there too.
 
 ## Create Project AGENTS.md
 
@@ -231,13 +229,12 @@ Copy the template contents into the project's `AGENTS.md` and replace every `{Ap
 
 ### Auto (per-page or global)
 
+Server `Program.cs`:
+
 ```csharp
-// Server Program.cs
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents()
     .AddInteractiveWebAssemblyComponents();
-
-// ...
 
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode()

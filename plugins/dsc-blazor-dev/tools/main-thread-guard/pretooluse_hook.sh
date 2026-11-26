@@ -23,7 +23,9 @@
 # normal deny applies (fail closed -- any parse doubt means deny):
 #   - tool is Edit (never Write), not replace_all, and a session_id is present
 #   - the changed text is ONE line on each side (old_string and new_string),
-#     trimmed, and each side is a "//" comment line (also "///" doc comments)
+#     trimmed, and each side is a "///" doc comment line. A plain "//" line no
+#     longer qualifies: code carries no comments except doc comments
+#     (tools/comment-guard), so there is nothing to fix in one.
 #     i.e. human-readable text only, never logic, structure, or identifiers
 #   - at most BLZ_FAST_PATH_MAX (default 3) such edits per session
 # Kill switch: BLZ_FAST_PATH_DISABLE=1.
@@ -87,7 +89,7 @@ trim_line() {
   printf '%s' "$1" | sed -E 's/^(\\t|[[:space:]])+//; s/(\\t|[[:space:]])+$//'
 }
 
-COMMENT_LINE="^//"
+COMMENT_LINE="^///"
 
 is_trivial_line() {
   [ -n "$1" ] || return 1
@@ -127,4 +129,4 @@ fi
 
 JSON_SAFE_PATH="$(printf '%s' "$FILE_PATH" | sed 's/\\/\\\\/g; s/"/\\"/g')"
 
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"blazor-dev routing: the main thread must not write or edit C#/Razor source itself (path: %s). Do not retry this Write/Edit. Instead: (1) tell the user which agent you are delegating to; (2) LOW complexity -> launch blazor-dev:blazor-developer via the Task tool; MEDIUM/HIGH -> /blazor-dev:blazor-spec-create then blazor-dev:blazor-conductor; (3) the requirement doc goes in requirements/{req}/{req}.spec.md, never an external artifact; (4) the delegated agent must return its Skills Evidencing block, and you must include it in your reply; (5) fast path: only a single-line Edit of a // comment is allowed in the main thread (max 3 per session). If the user explicitly told you to edit the code yourself, say so and ask them to set BLZ_MAIN_THREAD_GUARD_DISABLE=1."}}\n' "$JSON_SAFE_PATH"
+printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"blazor-dev routing: the main thread must not write or edit C#/Razor source itself (path: %s). Do not retry this Write/Edit. Instead: (1) tell the user which agent you are delegating to; (2) LOW complexity -> launch blazor-dev:blazor-developer via the Task tool; MEDIUM/HIGH -> /blazor-dev:blazor-spec-create then blazor-dev:blazor-conductor; (3) the requirement doc goes in requirements/{req}/{req}.spec.md, never an external artifact; (4) the delegated agent must return its Skills Evidencing block, and you must include it in your reply; (5) fast path: only a single-line Edit of a /// doc comment is allowed in the main thread (max 3 per session). If the user explicitly told you to edit the code yourself, say so and ask them to set BLZ_MAIN_THREAD_GUARD_DISABLE=1."}}\n' "$JSON_SAFE_PATH"

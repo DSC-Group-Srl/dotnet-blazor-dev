@@ -33,7 +33,7 @@ description: >
 
 ```csharp
 [Parameter] public RenderFragment? ChildContent { get; set; }
-[Parameter] public RenderFragment<TItem>? RowTemplate { get; set; }  // generic template
+[Parameter] public RenderFragment<TItem>? RowTemplate { get; set; }
 ```
 
 Use `@typeparam TItem` for generic components.

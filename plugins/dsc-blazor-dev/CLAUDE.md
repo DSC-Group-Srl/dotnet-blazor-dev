@@ -107,12 +107,12 @@ parallel; concurrent Git Bash start-ups intermittently die and the harness silen
 hook, guards included. So `hooks/hooks.json` has **one bash entry per event**:
 
 - **SessionStart** → `tools/hooks/sessionstart.sh`: runs the .NET tools, npx, python, rules,
-  routing, git branch policy, VS Code workspace and heartbeat scripts as background jobs of
+  routing, git branch policy, comment rule, VS Code workspace and heartbeat scripts as background jobs of
   that one process, each with its own timeout, and merges their `additionalContext` into one
   JSON payload. `tools/environment/git-bash-check.ps1` stays a separate PowerShell hook.
 - **PreToolUse** (no matcher) → `tools/hooks/pretooluse.sh`: starts `metrics/alive.sh` in the
   background, then routes by `tool_name`: Read and Bash/PowerShell to the read-guard,
-  Write/Edit to conductor-guard then main-thread-guard (first deny wins). Other tools: silent.
+  Write/Edit to conductor-guard, comment-guard, then main-thread-guard (first deny wins). Other tools: silent.
 - **SessionEnd**, **SubagentStop**: the two metrics scripts.
 
 A new hook script goes into the matching dispatcher, never as a new `hooks.json` entry.
@@ -127,15 +127,21 @@ installed next to `bc-dev`. `tools/hooks/lib.sh` holds the three tests the hooks
 |---|---|---|
 | .NET workspace | a solution or project file at the session folder or one level down | rules nudge, routing nudge, session/subagent telemetry, the alive heartbeat |
 | initialized | `/blazor-dev:blazor-initialize` ran: `.claude/rules/csharp-guidelines.md` at the session folder or an ancestor up to the repo root | **main-thread-guard** and **read-guard** bind only here |
-| bc-dev enabled | `bc-dev@…: true` in the user's `settings.json` | the git branch policy and the VS Code workspace nudge stand down: bc-dev ships the same two for every repo |
+| bc-dev enabled | `bc-dev@…: true` in the user's `settings.json` | the git branch policy, the VS Code workspace nudge and the comment-rule line stand down: bc-dev ships the same three for every repo (the comment-guard itself always runs) |
 
 ## Guards
 
 - **conductor-guard**: `blazor-conductor` cannot Write/Edit `.cs`/`.razor`/`.cshtml`.
 - **main-thread-guard** (initialized projects): the main thread cannot Write/Edit those files
-  either; it delegates to `blazor-developer` or the conductor. A single-line `//` comment edit
-  passes (max 3 per session). Kill switch `BLZ_MAIN_THREAD_GUARD_DISABLE=1`. Self-test:
+  either; it delegates to `blazor-developer` or the conductor. A single-line `///` doc-comment
+  edit passes (max 3 per session); a plain `//` line does not, code carries none. Kill switch `BLZ_MAIN_THREAD_GUARD_DISABLE=1`. Self-test:
   `bash tools/main-thread-guard/test_hook.sh`.
+- **comment-guard** (every project, every session): denies a Write/Edit that adds a comment
+  other than a `///` or `/** */` documentation comment to `.cs`, `.razor`, `.cshtml`, JS/TS,
+  CSS or SQL (also `.al` and C/AL when those are edited here). Only comments the edit adds count:
+  existing ones never block an unrelated edit. `tools/comment-guard/rule_hook.sh` states the rule
+  at SessionStart; `/blazor-dev:blazor-comment-cleanup` removes the existing ones. Kill switch
+  `DSC_COMMENT_GUARD_DISABLE=1`. Self-test: `python tools/comment-guard/test_comment_guard.py`.
 - **read-guard** (initialized projects): a whole-file read of a source file over
   `BLZ_READ_MIN_LINES` (350) is denied twice; a third identical attempt is the escape.
   `blazor-file-reader` returns the line ranges instead. Kill switch `BLZ_READ_GUARD_DISABLE=1`.
